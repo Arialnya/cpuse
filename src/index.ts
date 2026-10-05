@@ -2,12 +2,15 @@ import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools';
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools';
+import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';
 import '@deepseek-ai/dsh-system-prompt';
 import type {} from '@deepseek-ai/dsh-computer-use';
 import { NativeBackend } from './backend.js';
 import { Controller, normalizeAppId } from './controller.js';
-import { methods, actions, type Method, type Screenshot, type WindowState } from './types.js';
+import { methods, actions, ComputerUseError, type Method, type Screenshot, type WindowState } from './types.js';
+import { failureDiagnostic } from './recovery.js';
+import type { WindowAlias } from './discovery.js';
 import { descriptions, schemas } from './schemas.js';
 import { guidance } from './guidance.js';
 
@@ -16,6 +19,7 @@ export const inject = ['tools', 'systemPrompt'];
 export interface Config {
   helperPath?: string; timeoutMs: number; observationTtlMs: number; screenshots: boolean; allowPrintWindowFallback: boolean;
   allowedApps: string[]; deniedApps: string[]; trustedApps: string[]; approvalMode: 'always' | 'app';
+  allowClipboardPaste: boolean; windowAliases: WindowAlias[];
 }
 export const Config: z<Config> = z.object({
   helperPath: z.string().description('Optional absolute path to the independently built native helper.'),
@@ -23,6 +27,8 @@ export const Config: z<Config> = z.object({
   observationTtlMs: z.number().min(1000).max(120000).default(30000),
   screenshots: z.boolean().default(true).description('Disable for a text-only model route; UIA remains available.'),
   allowPrintWindowFallback: z.boolean().default(false).description('Opt into explicitly labelled PrintWindow capture when WGC fails.'),
+  allowClipboardPaste: z.boolean().default(false).description('Permit explicit type_text method=paste. Never enabled by model arguments; clipboard contents are preserved conservatively.'),
+  windowAliases: z.array(z.object({ name: z.string(), terms: z.array(z.string()) })).default([]).description('Search aliases for actual window titles/processes; they do not grant permission or create window identities.'),
   allowedApps: z.array(z.string()).default([]).description('Exact returned app identifiers; empty permits apps subject to approval.'),
   deniedApps: z.array(z.string()).default([]),
   trustedApps: z.array(z.string()).default([]).description('Exact returned app identifiers that skip the host approval ask entirely. Trusted apps still pass every deniedApps, built-in exclusion and window-identity check; only list apps this agent may drive unattended.'),
@@ -82,7 +88,7 @@ export async function apply(ctx: Context, config: Config) {
     const prior = await next();
     if (prior.kind !== 'allow') return prior;
     const method = toolNames.get(exec.name);
-    if (!method || ['list_apps', 'list_windows', 'capabilities'].includes(method)) return prior;
+    if (!method || ['list_apps', 'list_windows', 'find_window', 'capabilities'].includes(method)) return prior;
     const app = appFrom(method, exec.arguments);
     // trustedApps is an explicit, per-app opt-out of the host approval ask. It is
     // evaluated before the one-shot approvedApps memory, so a trusted app never
@@ -97,7 +103,12 @@ export async function apply(ctx: Context, config: Config) {
       name: `computer_use_${method}`, rawName: method, description: descriptions[method],
       inputSchema: { ...parameterSchemaSpecToJsonSchema(schemas[method]) },
       async call(args, exec) {
-        const result = await controller.execute(method, args, { owner: owner(exec), signal: exec.signal });
+        let result: unknown;
+        try { result = await controller.execute(method, args, { owner: owner(exec), signal: exec.signal }); }
+        catch (error) {
+          if (error instanceof ComputerUseError) throw new HarnessError(JSON.stringify(failureDiagnostic(error, method, args)), error.code);
+          throw error;
+        }
         const app = appFrom(method, args);
         if (app) approvedApps.add(`${owner(exec)}:${app.toLowerCase()}`);
         return modelResult(result);

@@ -9,6 +9,8 @@
 /research/
 /.npm-cache/
 /*.tgz
+/*.tgz.sha256
+/*.tgz.release.json
 /*.zip
 
 # Test coverage and local logs

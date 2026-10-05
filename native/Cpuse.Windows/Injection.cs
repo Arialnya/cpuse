@@ -1,42 +1,53 @@
 namespace Cpuse.Windows;
 
 /// <summary>
-/// Desktop input injection needs a token that may write the interactive desktop.
-/// A sandboxed or low-integrity helper keeps reporting successful SendInput
-/// calls while UIPI silently drops every event, which would tell the model an
-/// action happened when nothing did. The gate probes the real condition once and
-/// refuses input up front; coordinate input is verified again after the move.
+/// Desktop access and UIPI are separate checks. Cursor access cannot establish
+/// whether a particular target may receive input from this process's token.
 /// </summary>
 internal static class Injection
 {
-    private static bool? available;
-
     /// <summary>
-    /// A no-op <c>SetCursorPos</c> to the current position fails exactly when the
-    /// desktop refuses this process's input, and changes nothing when it succeeds.
+    /// A no-op cursor move checks window-station access only. It is neither an
+    /// application acceptance test nor a UIPI test, and is not cached indefinitely.
     /// </summary>
     internal static bool Available
     {
         get
         {
-            if (available is null)
-                available = Win32.GetCursorPos(out var point) && Win32.SetCursorPos(point.X, point.Y);
-            return available.Value;
+            return Win32.GetCursorPos(out var point) && Win32.SetCursorPos(point.X, point.Y);
         }
     }
 
     internal static string Integrity => Win32.IntegrityName();
 
-    internal static string State => Available ? "allowed" : "blocked";
+    internal static string State => Available ? "target-dependent" : "blocked";
 
     internal static string Note => Available
-        ? "Desktop input injection is available to this helper."
-        : $"This helper runs with a {Integrity} integrity token, so Windows drops every injected desktop event (UIPI). Input methods fail with INPUT_BLOCKED instead of reporting success; observation and UIA methods still work. Check the helper's own path too: a Low mandatory integrity label left behind by a file-system sandbox makes that executable launch at Low integrity everywhere.";
+        ? "Window-station cursor access is available. Every selected target is separately checked for UIPI; queued input still requires a refreshed observation to confirm the application handled it."
+        : $"The helper ({Integrity} integrity) cannot access the current desktop cursor. Input is unavailable; no privileges or executable security labels are changed by this plugin.";
 
     internal static void Require(string method)
     {
         if (Available) return;
-        throw new RpcError("INPUT_BLOCKED", $"Cannot inject desktop input for {method}: the native helper runs with a {Integrity} integrity token, so Windows silently drops every SendInput event (UIPI). Either the process is sandboxed, or its own executable carries a Low mandatory integrity label (an elevated `icacls <tree> /setintegritylevel (OI)(CI)Medium /T` clears that residue). Run the helper at medium integrity, or use observation and UIA methods (list_apps, list_windows, get_window, get_window_state, set_value, perform_secondary_action).");
+        throw new RpcError("INPUT_BLOCKED", $"Cannot access the current desktop for {method}. The helper has {Integrity} integrity; the cursor access test alone cannot identify UIPI. Stop input attempts, report the limitation, and continue observation if useful. Do not change privileges, ACLs, integrity labels, or use another input channel.");
+    }
+
+    internal static (string Status, string? Reason, string Helper, string Target) TargetState(nint hwnd)
+    {
+        var helper = Win32.ProcessIntegrity(Win32.GetCurrentProcess());
+        var target = Win32.WindowIntegrity(hwnd);
+        if (helper.Rid is null || target.Rid is null)
+            return ("unknown", "Cannot read helper/target mandatory integrity; input is refused before sending events.", helper.Name, target.Name);
+        if (helper.Rid < target.Rid)
+            return ("blocked", "The selected target has a higher mandatory integrity level; UIPI prevents input. Report this to the user; do not elevate or bypass the plugin.", helper.Name, target.Name);
+        return ("allowed", null, helper.Name, target.Name);
+    }
+
+    internal static void RequireTarget(nint hwnd)
+    {
+        var state = TargetState(hwnd);
+        if (state.Status == "unknown") throw new RpcError("INPUT_IDENTITY_UNAVAILABLE", state.Reason!);
+        if (state.Status == "blocked") throw new RpcError("INPUT_TARGET_BLOCKED", $"{state.Reason} Helper={state.Helper}, target={state.Target}. No input was sent.");
     }
 
     /// <summary>
@@ -45,8 +56,8 @@ internal static class Injection
     /// </summary>
     internal static void VerifyPointer(Win32.POINT target)
     {
-        if (!Win32.GetCursorPos(out var actual)) return;
+        if (!Win32.GetCursorPos(out var actual)) throw new RpcError("INPUT_OUTCOME_UNKNOWN", "Pointer events were queued but the resulting cursor cannot be read. Observe before deciding what remains; nothing was retried.");
         if (Math.Abs(actual.X - target.X) <= 2 && Math.Abs(actual.Y - target.Y) <= 2) return;
-        throw new RpcError("INPUT_DROPPED", $"Injected pointer movement had no effect: the cursor is at {actual.X},{actual.Y} instead of {target.X},{target.Y}. The desktop refused the input (sandboxed helper, UIPI, or an input-filtering driver); nothing was retried.");
+        throw new RpcError("INPUT_DROPPED", $"Queued pointer movement did not reach the requested point: the cursor is at {actual.X},{actual.Y} instead of {target.X},{target.Y}. Clipping, input filtering, or another actor may have changed it; UIPI is not established by this result. Nothing was retried.");
     }
 }

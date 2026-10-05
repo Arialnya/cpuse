@@ -74,6 +74,7 @@ async function setup(t, options = {}) {
     if (method === 'get_window_state') return {
       window: structuredClone(params.window), observation_id: `observation-${++serial}`,
       accessibility: { tree: '[0] Edit', focused_element: '[0] Edit' },
+      input: { injection: 'allowed', focus: { source: 'uia', in_window: true, password: 'no', can_type: true }, text_methods: ['unicode', 'paste'] },
       screenshots: params.include_screenshot ? [{
         id: `screenshot-${serial}`, url: `data:image/png;base64,${png.toString('base64')}`,
         width: 1, height: 1, originX: 0, originY: 0, zIndex: 0,
@@ -124,12 +125,12 @@ async function observe(execute) {
   return canonical(await execute('get_window_state', { window }));
 }
 
-test('real Cordis mounts all 14 tools and guidance, and unload removes both', async t => {
+test('real Cordis mounts every computer-use tool and guidance, and unload removes both', async t => {
   const { ctx, fiber, calls, closed } = await setup(t);
   const names = methods.map(method => `computer_use_${method}`);
   assert.deepEqual(ctx.tools.schemas().map(tool => tool.name).sort(), [...names].sort());
   const assembled = await ctx.systemPrompt.assemble();
-  assert.equal(assembled.tools.length, 14);
+  assert.equal(assembled.tools.length, methods.length);
   const guidance = assembled.sections.find(section => section.name === 'computer-use:cpuse');
   assert.ok(guidance);
   assert.match(guidance.text, /observation_id/);
@@ -146,7 +147,7 @@ test('the optional real computer-use registry prevents a second cpuse provider',
   const competing = ctx.plugin(plugin, { screenshots: false });
   await assert.rejects(competing.await(), /computer use provider "cpuse" is already registered/);
   assert.equal(ctx.computerUse.providerName, 'cpuse');
-  assert.equal(ctx.tools.schemas().length, 14);
+  assert.equal(ctx.tools.schemas().length, methods.length);
   assert.equal(calls.length, 0);
   await competing.dispose();
   await fiber.dispose();
@@ -427,4 +428,93 @@ test('unload cancels in-flight MCP image admission and waits for the tool to set
     await invocation;
     await disposing;
   }
+});
+
+function diagnostic(result, code) {
+  assert.equal(result.isError, true);
+  assert.equal(result.error.info.code, code, 'The Harness failure must retain its machine-readable code.');
+  const value = JSON.parse(result.error.message);
+  assert.equal(value.code, code);
+  assert.equal(value.recovery.automatic_retry, false);
+  return value;
+}
+
+test('structured focus failures retain real Harness errors without sending or disclosing typed text', async t => {
+  const { execute, calls } = await setup(t, {
+    config: { trustedApps: [window.app] },
+    hook: (method, params) => method === 'get_window_state' ? {
+      window: params.window, observation_id: 'no-text-focus', accessibility: null, screenshots: [],
+      input: { injection: 'allowed', focus: { source: 'win32', in_window: true, password: 'unknown', can_type: false }, text_methods: [] },
+    } : undefined,
+  });
+  const state = await observe(execute);
+  const result = await execute('type_text', { window, observation_id: state.observation_id, text: 'private literal payload' });
+  const failure = diagnostic(result, 'FOCUS_UNKNOWN');
+  assert.equal(failure.operation, 'type_text');
+  assert.equal(failure.native_request_dispatched, false);
+  assert.equal(failure.input_outcome, 'not_sent');
+  assert.equal(failure.recovery.next_action, 'observe_then_select_focus_once');
+  assert.ok(failure.recovery.allowed_methods.includes('press_key'));
+  assert.deepEqual(failure.target, { id: window.id, app: window.app });
+  assert.equal(result.error.message.includes('private literal payload'), false);
+  assert.equal(calls.filter(call => call.method === 'type_text').length, 0);
+});
+
+test('input uncertainty stays an error and pauses replay across fresh snapshots and text methods', async t => {
+  const { execute, calls } = await setup(t, {
+    config: { trustedApps: [window.app], allowClipboardPaste: true },
+    hook: method => { if (method === 'type_text') throw new ComputerUseError('INPUT_PARTIAL', 'The fixture inserted only part of an input batch.'); },
+  });
+  const state = await observe(execute);
+  const failed = diagnostic(await execute('type_text', { window, observation_id: state.observation_id, text: 'original' }), 'INPUT_PARTIAL');
+  assert.equal(failed.native_request_dispatched, true);
+  assert.equal(failed.input_outcome, 'unknown');
+  assert.equal(failed.recovery.human_required, true);
+  assert.equal(failed.recovery.next_action, 'stop_input_and_report');
+  const fresh = canonical(await execute('get_window_state', { window }));
+  const paused = diagnostic(await execute('type_text', { window, observation_id: fresh.observation_id, text: 'retry', method: 'paste' }), 'INPUT_PAUSED');
+  assert.equal(paused.original_code, 'INPUT_PARTIAL');
+  assert.equal(paused.native_request_dispatched, false);
+  assert.equal(calls.filter(call => call.method === 'type_text').length, 1);
+});
+
+test('an input channel stop leaves unrelated legitimate Harness tools usable', async t => {
+  const { ctx, execute, calls, agent } = await setup(t, {
+    config: { trustedApps: [window.app] },
+    hook: method => { if (method === 'press_key') throw new ComputerUseError('INPUT_TARGET_BLOCKED', 'Fixture target has greater integrity.'); },
+  });
+  ctx.tools.register({
+    name: 'fixture_legitimate_read', description: 'An unrelated read-only fixture tool.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async () => 'still available',
+  });
+  const state = await observe(execute);
+  diagnostic(await execute('press_key', { window, observation_id: state.observation_id, key: 'Return', mode: 'scan-code' }), 'INPUT_TARGET_BLOCKED');
+  const fresh = canonical(await execute('get_window_state', { window }));
+  diagnostic(await execute('click', { window, observation_id: fresh.observation_id, element_index: 0 }), 'INPUT_PAUSED');
+  const result = await ctx.tools.execute({
+    callId: ToolCallId('unrelated-fixture-call'), name: 'fixture_legitimate_read', arguments: {}, agent,
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.isError, false);
+  assert.equal(result.value, 'still available');
+  assert.equal(calls.filter(call => call.method === 'press_key').length, 1);
+  assert.equal(calls.filter(call => call.method === 'click').length, 0);
+});
+
+test('game window searches remain read-only under never approval and do not authorize observation', async t => {
+  const game = { id: 222, app: 'C:\Games\sts2.exe', title: '', process_name: 'sts2.exe' };
+  let asks = 0;
+  const { execute, calls } = await setup(t, {
+    policy: 'never', answer: async () => { asks++; return 'allowed-once'; },
+    hook: method => method === 'list_windows' ? [game] : undefined,
+  });
+  const found = canonical(await execute('find_window', { query: '杀戮尖塔2' }));
+  assert.deepEqual(found.windows, [game]);
+  assert.equal(found.matched, true);
+  const observed = await execute('get_window_state', { window: found.windows[0] });
+  assert.equal(observed.isError, true);
+  assert.equal(asks, 0);
+  assert.deepEqual(calls.map(call => call.method), ['list_windows']);
 });

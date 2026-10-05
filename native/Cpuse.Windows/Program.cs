@@ -44,7 +44,9 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                var error = ex is RpcError rpc ? new { code = rpc.Code, message = rpc.Message } : new { code = "BACKEND_ERROR", message = ex.Message };
+                // Provider exception messages may embed UI or input content.
+                // Return diagnostic identifiers, never their arbitrary message.
+                var error = ex is RpcError rpc ? new { code = rpc.Code, message = rpc.Message } : new { code = "BACKEND_ERROR", message = $"Native provider failure ({ex.GetType().Name}, HRESULT 0x{ex.HResult:X8}). Stop the action, preserve observation if possible, and report the limitation for human diagnosis." };
                 Console.WriteLine(JsonSerializer.Serialize(new { id, error }));
                 Console.Error.WriteLine($"{DateTimeOffset.UtcNow:O} {error.code}: {error.message}");
             }

@@ -91,3 +91,26 @@ test('observation switches are explicit booleans; unknown arguments do not reach
   assert.deepEqual(validate('get_window', { id: window.id, app: window.app, command: 'ignored' }),
     { id: window.id, app: window.app });
 });
+
+test('window search accepts a bounded query and never forwards invented target identities', () => {
+  assert.deepEqual(validate('find_window', { query: '杀戮尖塔 2', id: 999, app: 'invented.exe', command: 'ignored' }),
+    { query: '杀戮尖塔 2' });
+  for (const query of ['', undefined, 42, 'x'.repeat(257), 'game\0name']) {
+    invalid(() => validate('find_window', { query }));
+  }
+});
+
+test('input modes are explicit and cannot enable a native clipboard or privilege bypass', () => {
+  for (const mode of ['virtual-key', 'scan-code']) {
+    assert.equal(validate('press_key', { ...observed, key: 'Return', mode }).mode, mode);
+  }
+  for (const mode of ['scan', 'auto', '', 1, ['scan-code'], { toString: () => 'scan-code' }]) invalid(() => validate('press_key', { ...observed, key: 'Return', mode }));
+  for (const method of ['unicode', 'paste']) {
+    const result = validate('type_text', { ...observed, text: '中文🙂', method, allow_clipboard_paste: true, run_as_admin: true });
+    assert.equal(result.method, method);
+    assert.equal(Object.hasOwn(result, 'allow_clipboard_paste'), false);
+    assert.equal(Object.hasOwn(result, 'run_as_admin'), false);
+  }
+  for (const method of ['auto', 'clipboard', '', true, ['paste'], { toString: () => 'unicode' }]) invalid(() => validate('type_text', { ...observed, text: 'hello', method }));
+  invalid(() => validate('press_key', { ...observed, key: 'Win+R', mode: 'scan-code' }));
+});

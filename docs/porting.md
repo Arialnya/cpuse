@@ -43,7 +43,7 @@ Harness 的策略接口是 `tools/pre-execute` 等执行钩子，以及需要单
 
 Codex 的公开 Computer Use 使用会话 JavaScript facade 调用 `sky` window2 API，按应用/窗口枚举、UIA 状态与截图观察、目标窗口输入、新状态核实形成闭环。Windows 实现依托 UI Automation、`SendInput` 和 Windows.Graphics.Capture。
 
-本项目保留这层开发体验与工作流，提供十三类窗口操作的独立实现。`src/client.ts` 提供会话客户端，Harness 注册对应的模型工具；`src/controller.ts` 执行枚举绑定、观察新鲜度、会话隔离、应用过滤、输入串行与动作后刷新；`src/backend.ts` 管理进程通信；`native/Cpuse.Windows` 调用公开 Windows API。
+本项目保留这层开发体验与工作流，提供十三类窗口操作，以及窗口搜索和能力诊断，共十五个模型工具。`src/client.ts` 提供会话客户端；`src/controller.ts` 执行枚举绑定、观察新鲜度、会话隔离、应用过滤、输入串行、失败暂停与动作后刷新；`src/backend.ts` 管理进程通信；`native/Cpuse.Windows` 调用公开 Windows API。
 
 为避免模型拿旧索引或错误截图发送输入，本项目要求输入显式携带 `observation_id`，坐标操作引用 `screenshotId`。这比参考 API 的部分可选字段更严格。用户侧客户端可缓存这些引用，但缓存失效后必须重新观察。
 
@@ -57,6 +57,6 @@ Codex 专有包、私有 helper、浏览器控制、OpenAI 模型视觉能力、
 
 ## 已执行的 Harness 组合验证
 
-`tests/plugin.test.mjs` 已在上述 `0.2.0-rc.2` 发布包组合上重新通过全部 15 项检查，使用实际 Cordis `4.0.4`、ToolRuntime、SystemPrompt、ApprovalService、ComputerUseRegistry、Session、LlmRuntime 和 MCP 结果适配器加载本插件。只替换原生后端边界及附件存储介质，测试不会启动 helper 或操作用户窗口。覆盖全部十四个工具注册与卸载、提示词组合、审批服务缺失时拒绝、`never` 策略、会话批准隔离、上游拒绝、取消审批及晚到批准、在途调用与图像准入卸载、provider 共存拒绝及延迟关闭期间的注册保留，以及支持/不支持图像的模型路由结果。
+`tests/plugin.test.mjs` 在上述 `0.2.0-rc.2` 发布包组合上通过，使用实际 Cordis `4.0.4`、ToolRuntime、SystemPrompt、ApprovalService、ComputerUseRegistry、Session、LlmRuntime 和 MCP 结果适配器加载本插件。只替换原生后端边界及附件存储介质，测试不会启动 helper 或操作用户窗口。覆盖全部十五个工具注册与卸载、提示词组合、审批服务缺失时拒绝、`never` 策略、会话批准隔离、上游拒绝、取消审批及晚到批准、在途调用与图像准入卸载、provider 共存拒绝及延迟关闭期间的注册保留，以及支持/不支持图像的模型路由结果。0.1.2 增加窗口别名搜索、游戏输入、剪贴板配置边界和 SDK 错误码检查；数量与范围见最新验证记录。
 
 图像测试验证固定 PNG 字节通过 AttachmentStore 接纳后，模型结果包含 Harness 附件引用，截图原始尺寸与观察标识留在规范值中；不支持图像的模型得到明确诊断，同时程序调用仍能读取原始 MCP 图像数据。该测试使用内存附件后端，不证明真实宿主磁盘存储、模型视觉推理或 Windows 截图质量。

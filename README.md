@@ -6,7 +6,7 @@
 >
 > 它还会**真实移动鼠标、切换前台窗口、发送键盘输入**。请只在能接受误操作风险的环境中使用，重要操作前先备份，生产环境默认别用。
 
-按 Codex Windows Computer Use 的原理独立实现：枚举应用/窗口 → UI Automation 与窗口截图观察 → 向绑定窗口发送输入 → 返回新状态验证。包含全部 13 项公开 window2 操作，以及 `capabilities` 诊断工具。
+按 Codex Windows Computer Use 的原理独立实现：枚举应用/窗口 → UI Automation 与窗口截图观察 → 向绑定窗口发送输入 → 返回新状态验证。包含全部 13 项公开 window2 操作，以及 `find_window` 搜索和 `capabilities` 诊断工具。
 
 这是使用公开 Windows API 编写的实现，不依赖 Codex 安装、`@oai/sky` 或其私有 helper。适用 Windows 10 19041+ / Windows 11；浏览器可作为普通窗口控制。Codex 的私有实现、DOM 浏览器接口和 macOS 后端不在本包内。
 
@@ -38,55 +38,30 @@ npx @deepseek-ai/dsh@0.2.0-rc.2 --profile cpuse
 powershell -NoProfile -File scripts/build-native.ps1 -Runtime win-arm64
 ```
 
-### 从 GitHub 仓库安装（推荐：预构建 tarball，免构建）
+### 从 GitHub Release 安装（推荐：校验下载，免构建）
 
-Release 附件里的 `.tgz` 已经包含编译好的 JS 与自包含 .NET helper，pnpm 对 tarball **不执行任何构建脚本**，因此目标机器不需要 `allowBuilds`、也不需要 .NET SDK，Windows 10 19041+/11 x64 均可直接安装。
+Release 的 `.tgz` 包含编译好的 JS 与自包含 Windows x64 helper。使用脚本下载明确版本，核对 GitHub 资产的 SHA-256 和大小后，再把输出的绝对路径粘贴到 DSH「插件 → 安装」：
 
-**步骤一：下载附件**（浏览器直接打开即可）：
-
-```text
-https://github.com/Arialnya/cpuse/releases/download/v0.1.1/dsh-plugin-cpuse-0.1.1.tgz
+```powershell
+# 在本仓库目录中执行；0.1.1 是已经发布的旧版，新版本发布后换成对应版本号
+node scripts/download-release.mjs --version 0.1.1 --out-dir "$env:USERPROFILE\Downloads\cpuse"
 ```
 
-**步骤二：在 DSH「插件 → 安装」的输入框里粘贴下载文件的绝对路径**（必须以 `/` 或盘符开头、以 `.tgz` 结尾）：
+下载脚本不修改 profile、不执行下载包中的代码。已校验 `.tgz` 应保留，供 profile 重装使用；安装预构建包无需 .NET SDK，也无需放行插件构建脚本。浏览器手动下载时，请先与该 Release 的可信 SHA-256 校验值核对。
 
-```text
-E:\downloads\dsh-plugin-cpuse-0.1.1.tgz
-```
-
-> 为什么推荐本地路径而不是 tarball 的 HTTP 地址？pnpm 只有在真正下载过附件之后，才会把 `integrity` 写进 lockfile；一旦这次下载没成功（网络或代理不通、或复用了上次失败的解析结果），紧接着的 frozen 校验就会报 `[ERR_PNPM_MISSING_TARBALL_INTEGRITY]`，把真正的网络失败掩盖掉。`file:` 来源（本地绝对路径）在 pnpm 里显式豁免该校验，断网也能装；要一句 spec 直装，请用 npm registry（见下）。
+`ERR_PNPM_MISSING_TARBALL_INTEGRITY` 是 pnpm 锁文件里远程 tarball 缺少预期摘要，不能据此判断网络失败。已在干净目录用 pnpm **11.22.0** 验证旧版 GitHub URL 安装和随后 frozen/offline 重装成功；用户宿主的自带 pnpm 与旧锁文件可能产生不同结果。使用已校验本地包可避开远程 URL 的摘要解析问题，同时保留下载校验和宿主供应链策略。已有损坏锁文件可用 `scripts/repair-lockfile.mjs` 定点修复：先核对可信 SHA-256、预览，再备份原锁并只补该包的 SHA-512；不会删除整锁或放松供链策略。完整命令、验证结果与边界见 [安装指南](docs/installation.md)。
 
 ### 从 npm registry 安装（发布后可用）
 
-一旦包被 `npm publish` 到 registry，安装框里只写包名即可，registry 元数据自带 `integrity`，同样不需要构建：
+发布到 npm registry 后，可以在安装框中指定 `dsh-plugin-cpuse@<version>`。Registry 元数据携带 tarball 完整性摘要；本仓库尚不以未发布包名作为有效安装方式。
 
-```text
-dsh-plugin-cpuse
-```
+### 从 git 源安装（需要本机 .NET SDK）
 
-### 从 git 源安装（需要本机有 .NET 8/9 SDK）
-
-安装 spec 写 `github:Arialnya/cpuse` 或仓库 URL。这种方式拉到的是纯源码树、没有 `lib/`，pnpm 11 因此要执行包里的 `prepack` 构建，并会先用 `[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED]` 拦下；在该 profile 的 `pnpm-workspace.yaml` 里按报错提示放行即可：
-
-```yaml
-allowBuilds:
-  'dsh-plugin-cpuse@https://codeload.github.com/Arialnya/cpuse/tar.gz/<commit sha>': true
-```
-
-放行 key 是 `包名@codeload tarball URL`：pnpm 对 git 源只认这个精确 key（包名与通配符都不生效），而 URL 里带 commit，所以**每次推送新提交都要更新 key**——报错信息会打印当前该填的那一行。本机构建还需要 .NET 8/9 SDK，首次会下载 NuGet 依赖（约 360 MB）。
-
-安装 spec 写 `github:Arialnya/cpuse` 或仓库 URL。这种方式拉到的是纯源码树、没有 `lib/`，pnpm 11 因此要执行包里的 `prepack` 构建，并会先用 `[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED]` 拦下；在该 profile 的 `pnpm-workspace.yaml` 里按报错提示放行即可：
-
-```yaml
-allowBuilds:
-  'dsh-plugin-cpuse@https://codeload.github.com/Arialnya/cpuse/tar.gz/<commit sha>': true
-```
-
-放行 key 是 `包名@codeload tarball URL`：pnpm 对 git 源只认这个精确 key（包名与通配符都不生效），而 URL 里带 commit，所以**每次推送新提交都要更新 key**——报错信息会打印当前该填的那一行。本机构建还需要 .NET 8/9 SDK，首次会下载 NuGet 依赖（约 360 MB）。
+仓库 URL 指向源码，不包含 `lib/`。pnpm 11 可能要求显式批准源码包的 `prepack`，本机还需要 .NET SDK 和 npm/NuGet 网络。请仅按宿主显示的精确构建批准提示操作，不配置全局允许所有构建。普通用户优先安装预构建 Release 包。
 
 ## GitHub 源码仓库
 
-仓库保留源码、测试、文档和依赖锁文件。`node_modules/`、`lib/`、原生构建目录与 NuGet 缓存均由 `.gitignore` 排除；克隆后运行 `npm ci` 和 `npm run build:all` 即可重新生成。`npm pack` 会先完整构建，再将运行所需的 helper 和 .NET 运行时打入安装包；把生成的 `.tgz` 传到 GitHub Release 作为附件，别人就能下载后按上面的本地路径方式免构建安装（源码里没有 `lib/`，这正是 git 安装会被 pnpm 拦下构建脚本的原因）。
+仓库保留源码、测试、文档和依赖锁文件；生成目录与缓存由 `.gitignore` 排除。发布前运行 `npm pack`，再运行 `node scripts/release-manifest.mjs .\dsh-plugin-cpuse-<version>.tgz` 检查预编译运行时并生成 SHA-256/SHA-512 校验附件。将 `.tgz`、`.tgz.sha256` 和 `.tgz.release.json` 上传到对应版本的 GitHub Release；更新代码后使用新版本号，不覆盖旧版包。详细发布和安装检查见 [安装指南](docs/installation.md)。
 
 ## 实现能力
 
@@ -115,19 +90,23 @@ allowBuilds:
         approvalMode: always
         screenshots: true
         allowPrintWindowFallback: false
+        allowClipboardPaste: false
         timeoutMs: 30000
         observationTtlMs: 30000
         allowedApps: []
         deniedApps: []
         trustedApps: []
+        windowAliases: []
 ```
 
 - `approvalMode: always`：读取某应用之前审批；每次输入、启动和切换前台再走宿主审批。`app` 则在插件生命周期内按 agent/应用记住审批。实际批准/拒绝仍由 Harness 的审批服务决定，缺少该服务时需要审批的操作不会执行。
 - `allowedApps` / `deniedApps`：使用枚举返回的精确应用标识，忽略大小写和路径分隔符差异。空允许列表不限制普通应用。终端、锁屏和部分敏感应用为内置排除项。
 - `trustedApps`：列出的应用**完全跳过宿主审批提问**，在 `approvalMode: always`、甚至 Harness 的 `never` 审批策略下也可直接观察和输入。这是按应用显式放弃审批门槛的逃生舱：`deniedApps`、内置排除项和窗口身份校验仍然生效，但模型可以在无人确认的情况下读取该应用窗口内容并驱动其界面。只填写你需要无人值守操作的应用（例如固定的聊天工具），不要填写终端、浏览器、密码管理器或任何涉及支付、删除、上传的应用。
 - `screenshots: false`：供没有图像输入的模型使用 UIA 文字。没有图像能力的模型不会因为安装本插件而获得视觉理解；画布等弱 UIA 应用需要视觉模型。
-- `allowPrintWindowFallback: true`：WGC 失败时允许 PrintWindow 降级，结果明确报告实际后端与原因。某些 GPU 内容可能不完整；默认关闭。
+- `allowPrintWindowFallback: true`：WGC 失败时允许 PrintWindow 降级，结果明确报告实际后端与原因。某些 GPU 内容可能不完整；默认关闭。PrintWindow 失败时停止截图，不会自动激活窗口或复制可能包含其他应用内容的桌面区域。
 - `helperPath`：可信配置可指定已构建 helper 的绝对路径；模型工具不能更改它。
+- `allowClipboardPaste: true`：允许显式 `type_text(method: paste)`，用于不接受 Unicode 键事件的文本控件。仅在能够完整保存剪贴板内容时执行一次粘贴，再保守恢复；并发修改时不覆盖新内容。默认关闭，模型不能自行打开，也不会在结果不明后自动换成粘贴。helper 被强制终止时可能无法恢复临时剪贴板，第三方剪贴板监听也不能完全排除，按需由用户启用。
+- `windowAliases`：为实际窗口标题/进程配置搜索别名，例如 `[{name: 我的游戏, terms: [ActualGameProcess]}]`。别名不授予权限，也不创建窗口句柄。内置支持“杀戮尖塔2”与 `Slay the Spire 2` 的搜索对应。
 
 Windows 输入运行在已解锁的活动桌面，会移动指针和改变前台焦点。管理员应用受 Windows UIPI 限制；受保护内容、最小化窗口和应用自身的无障碍实现可能限制截图或控件操作。桌面操作过程中的人为干预和应用异步变化无法完全消除，需检查每次返回状态。
 
@@ -135,29 +114,19 @@ Windows 输入运行在已解锁的活动桌面，会移动指针和改变前台
 
 ## 输入被系统拒绝时
 
-helper 以自己的令牌向桌面注入输入。若它被沙箱、低完整性令牌或以其他受限身份启动，Windows 会**静默丢弃**每一次 `SendInput`（UIPI），原生层仍会报告成功。本插件因此先探测再执行：
+`computer_use_capabilities` 的 `input_injection: target-dependent` 表示需要逐目标检查。能够移动鼠标不证明可以向任意应用输入；Windows 把事件放进队列也不证明应用已经消费。`get_window_state` 的 `input` 会报告 helper/目标完整性等级、实际焦点和可用输入模式。
 
-- `computer_use_capabilities` 报告 `process_integrity`（`untrusted`/`low`/`medium`/`high`/…）与 `input_injection`（`allowed`/`blocked`）。探测本身是一次"移到当前位置"的空操作 `SetCursorPos`，不改变桌面。
-- `input_injection: blocked` 时，`click`、`press_key`、`type_text`、`scroll`、`drag` 直接返回 `INPUT_BLOCKED`，不会假装动作发生过。观察类方法与 UIA 方法（`list_apps`、`list_windows`、`get_window`、`get_window_state`、`set_value`、`perform_secondary_action`）不受影响。
-- 坐标输入移动指针后会核对 `GetCursorPos`，被丢弃的移动返回 `INPUT_DROPPED`，且不会自动重试。
+- `INPUT_TARGET_BLOCKED` / `INPUT_IDENTITY_UNAVAILABLE`：目标权限不兼容或无法可靠检查；停止该窗口的输入并报告用户。
+- `INPUT_NOT_ACCEPTED` / `INPUT_PARTIAL` / `INPUT_OUTCOME_UNKNOWN`：未确认文本改变、部分入队或结果不明；只观察，不自动重放、换方式重放或假装成功。
+- `INPUT_PAUSED`：该会话/窗口的失败输入通道已暂停。刷新截图、重新枚举或改文本方法都不能解除；用户完成诊断后可以重载插件。
 
-遇到 `INPUT_BLOCKED` 时，先查 helper 自己所在路径的**强制完整性标签**：DSH 的 Windows 文件系统沙箱会给授权根留下常驻 Low 标签（"常驻 Low 标签的生命期长于 DSH"），在该目录树里构建出来的 exe 会带着 Low 标签，Windows 于是在**任何**位置都以 Low 完整性启动它，UIPI 照旧丢弃全部注入。两种修法：
+错误不会授权模型调用终端、提权、修改安全标签、改审批/`trustedApps`，或换用其他注入程序。观察和其他目标仍可用；UIA 操作也要通过其自身的控件与权限检查。
 
-```powershell
-# 1) 提权后清掉残留标签（把标签升到 Medium 需要 SeRelabelPrivilege，普通会话只会得到"拒绝访问"）
-icacls "E:\my_files\dshh\cpuse" /setintegritylevel (OI)(CI)Medium /T /C
-```
+### 游戏窗口（包括《杀戮尖塔 2》）
 
-```yaml
-# 2) 或者不动标签：把 helper 构建/发布到没有标签的目录，再用可信配置指过去
-- id: cpuse
-  config:
-    helperPath: 'C:\Users\99607\AppData\Local\dsh-cpuse-native\cpuse-windows.exe'
-```
+先调用 `computer_use_find_window`，参数为 `{"query":"杀戮尖塔2"}`，从实际返回候选选择窗口。无标题的可见窗口也会返回真实进程名和窗口类；没有匹配时请用户启动/显示游戏，不用 Steam AppID 或进程猜测创建 HWND。
 
-`computer_use_capabilities` 的 `process_integrity` 会显示 helper 实际拿到的级别（`low`/`medium`…）。同一个 Low 令牌还会让 `Windows.Graphics.Capture` 与 `PrintWindow` 对本机**所有**窗口返回"拒绝访问"——此时截图只能靠上面的屏幕 BitBlt 兜底；helper 恢复中等完整性后 WGC 立即恢复正常。
-
-无法提权时的等价修法：标签只挂在目录与已存在的文件对象上，而**构建产物可以删掉重生成**——在被标 Low 的目录里删掉 `lib`（或 `lib/native`、`bin`、`obj`）再 `npm run build` / `npm run build:native`，新文件会从已经修好的上级目录继承 Medium。注意目录本身若是 Low，新建的子项仍会继承 Low，所以要从已被标 Low 的**最外层**那个目录开始逐层重建。
+游戏通常没有可编辑的 UIA 文本，先用 `get_window_state(include_text:false, include_screenshot:true)` 看画面，再做截图坐标点击或 `press_key(mode:scan-code)`。缺少 UIA 不代表需要提权；`type_text` 不是游戏按键。每步检查画面效果，`queued_unverified` 仅代表已入队。独占全屏、Raw Input、输入过滤器和更高权限目标仍可能需要用户选择窗口化/无边框模式或人工操作，插件不会绕过这些限制。详见 [游戏窗口排查](docs/game-windows.md)。
 
 审批是执行门槛，不能自动识别每个按钮的业务含义。插件提示要求模型遵循用户范围并在发送、删除、付款或分享等动作前取得用户批准；界面内容不能被当作授权。建议在需要独立工作的场景使用专用 Windows 会话或虚拟机。
 

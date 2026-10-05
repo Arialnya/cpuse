@@ -1,9 +1,11 @@
 import { basename } from 'node:path';
-import { actions, ComputerUseError, type AppInfo, type Backend, type Method, type WindowRef, type WindowState } from './types.js';
+import { actions, ComputerUseError, type AppInfo, type Backend, type InputReceipt, type Method, type WindowRef, type WindowState } from './types.js';
 import { validate } from './validation.js';
+import { findWindows, type WindowAlias } from './discovery.js';
 
 export interface ControllerOptions {
   allowedApps?: string[]; deniedApps?: string[]; observationTtlMs?: number; screenshots?: boolean; allowPrintWindowFallback?: boolean;
+  allowClipboardPaste?: boolean; windowAliases?: WindowAlias[];
 }
 export interface ExecutionContext { owner: string; signal?: AbortSignal }
 const blocked = ['cmd.exe', 'powershell.exe', 'pwsh.exe', 'windowsterminal.exe', 'wt.exe', 'bash.exe', 'wsl.exe', 'conhost.exe',
@@ -13,6 +15,20 @@ const blocked = ['cmd.exe', 'powershell.exe', 'pwsh.exe', 'windowsterminal.exe',
 export const normalizeAppId = (app: string) => app.replaceAll('/', '\\').toLowerCase();
 const normalize = normalizeAppId;
 const leaf = (app: string) => basename(app.replaceAll('\\', '/')).toLowerCase();
+const injected = new Set<Method>(['click', 'press_key', 'type_text', 'scroll', 'drag']);
+const blockedInput = new Set(['INPUT_BLOCKED', 'INPUT_TARGET_BLOCKED', 'INPUT_IDENTITY_UNAVAILABLE']);
+const uncertainInput = new Set(['INPUT_NOT_ACCEPTED', 'INPUT_PARTIAL', 'INPUT_OUTCOME_UNKNOWN', 'INPUT_DROPPED', 'CLIPBOARD_CHANGED']);
+const transportFailures = new Set(['ABORTED', 'TIMEOUT', 'HELPER_EXITED', 'HELPER_FAILED', 'PROTOCOL_ERROR']);
+// These native failures are only raised before SendInput. Focus/window/desktop
+// changes and occlusion are deliberately absent: later checks can fail after
+// an earlier click or input batch already reached the application.
+const zeroInputFailures = new Set(['INVALID_ARGUMENT', 'INVALID_KEY', 'SYSTEM_KEY_FORBIDDEN',
+  'FOCUS_FAILED', 'FOCUS_UNKNOWN', 'KEYBOARD_BUSY', 'PASSWORD_INPUT_FORBIDDEN',
+  'STALE_OBSERVATION', 'STALE_SCREENSHOT', 'UNKNOWN_ELEMENT', 'ELEMENT_CHANGED', 'ELEMENT_NOT_INTERACTABLE',
+  'COORDINATE_OUT_OF_BOUNDS', 'POINT_OFF_SCREEN', 'WINDOW_HIDDEN', 'WINDOW_UNRESPONSIVE', 'CLIPBOARD_UNAVAILABLE',
+  'UNBOUND_WINDOW', 'WINDOW_APP_MISMATCH', 'INVALID_REQUEST', 'REQUEST_TOO_LARGE', 'METHOD_NOT_FOUND',
+  'HELPER_NOT_BUILT', 'HELPER_STOPPING', 'UNSUPPORTED_PLATFORM', 'CLOSED']);
+const channel = (method: Method) => method === 'type_text' ? 'text' : ['click', 'drag', 'scroll'].includes(method) ? 'pointer' : method;
 
 // A Windows desktop is shared even by different Cordis plugin instances.
 let desktopQueue: Promise<void> = Promise.resolve();
@@ -28,6 +44,7 @@ export class Controller {
   private apps = new Set<string>();
   private observation?: { state: WindowState; owner: string; createdAt: number; epoch: number };
   private disposed = false;
+  private readonly inputStops = new Map<string, Map<string, string>>();
   private readonly ttl: number;
   constructor(private readonly backend: Backend, private readonly options: ControllerOptions = {}) {
     this.ttl = options.observationTtlMs ?? 30_000;
@@ -40,6 +57,20 @@ export class Controller {
       throw new ComputerUseError('APP_DENIED', 'App identifier is not in allowedApps. Use an exact identifier from list_apps.');
   }
   private remember(window: WindowRef) { this.windows.set(window.id, { ...window }); }
+  private stopKey(window: WindowRef, owner: string) { return JSON.stringify([owner, normalize(window.app), window.id]); }
+  private checkInputStop(window: WindowRef, owner: string, method: Method) {
+    const stops = this.inputStops.get(this.stopKey(window, owner));
+    const reason = (injected.has(method) ? stops?.get('injection') : undefined) ?? stops?.get(channel(method));
+    if (reason) throw new ComputerUseError('INPUT_PAUSED',
+      `Input channel is paused for this window after ${reason}. Observation does not reset it. Report to the human; do not replay input or change permissions. A human may reload the plugin after diagnosing the target.`,
+      { native_request_dispatched: false, input_outcome: 'not_sent', original_code: reason });
+  }
+  private stopInput(window: WindowRef, owner: string, method: Method, code: string) {
+    const key = this.stopKey(window, owner);
+    const stops = this.inputStops.get(key) ?? new Map<string, string>();
+    stops.set(blockedInput.has(code) ? 'injection' : channel(method), code);
+    this.inputStops.set(key, stops);
+  }
   private target(window: WindowRef): WindowRef {
     const known = this.windows.get(window.id);
     if (!known || normalize(known.app) !== normalize(window.app))
@@ -58,8 +89,14 @@ export class Controller {
       throw new ComputerUseError('STALE_SCREENSHOT', 'screenshotId does not belong to this observation.');
     if (args.element_index !== undefined && !observed.state.accessibility)
       throw new ComputerUseError('NO_ACCESSIBILITY', 'Observe with include_text:true before using element indexes.');
-    if (method === 'type_text' && !observed.state.accessibility?.focused_element)
-      throw new ComputerUseError('FOCUS_UNKNOWN', 'Observe accessibility focus before typing; click the editable surface first.');
+    if (injected.has(method) && observed.state.input?.injection === 'blocked')
+      throw new ComputerUseError('INPUT_BLOCKED', 'This target does not permit input from the configured helper. Keep observation available and ask the human to diagnose; do not change permissions.');
+    if (method === 'type_text') {
+      const focus = observed.state.input?.focus;
+      if (focus?.password === 'yes') throw new ComputerUseError('PASSWORD_INPUT_FORBIDDEN', 'Password inputs cannot receive text through this plugin.');
+      if (focus ? !focus.in_window || !focus.can_type || focus.password !== 'no' : !observed.state.accessibility?.focused_element)
+        throw new ComputerUseError('FOCUS_UNKNOWN', 'No verified non-password text focus. Observe/select an editable surface; games use coordinates or scan-code press_key, not type_text.');
+    }
     this.observation = undefined;
     return observed.state;
   }
@@ -69,6 +106,7 @@ export class Controller {
       window, include_screenshot: args.include_screenshot ?? this.options.screenshots ?? true,
       include_text: args.include_text ?? true,
       allow_print_window_fallback: this.options.allowPrintWindowFallback ?? false,
+      allow_clipboard_paste: this.options.allowClipboardPaste ?? false,
     }, context.signal);
     if (!state?.observation_id || state.window?.id !== window.id || normalize(state.window.app) !== normalize(window.app))
       throw new ComputerUseError('PROTOCOL_ERROR', 'Native helper returned a mismatched window state.');
@@ -79,12 +117,15 @@ export class Controller {
   execute(method: Method, input: unknown, context: ExecutionContext): Promise<unknown> {
     return exclusive(async () => {
       if (this.disposed) throw new ComputerUseError('CLOSED', 'Computer Use stopped.');
+      let actionWindow: WindowRef | undefined;
+      let actionDispatched = false;
       try {
         if (context.signal?.aborted) throw new ComputerUseError('ABORTED', 'Cancelled before dispatch.');
         const args = validate(method, input);
-        if (method === 'list_windows') {
-          const windows = await this.backend.call<WindowRef[]>(method, args, context.signal);
-          this.windows.clear(); windows.forEach(w => this.remember(w)); return windows;
+        if (method === 'list_windows' || method === 'find_window') {
+          const windows = await this.backend.call<WindowRef[]>('list_windows', {}, context.signal);
+          this.windows.clear(); windows.forEach(w => this.remember(w));
+          return method === 'find_window' ? findWindows(windows, String(args.query), this.options.windowAliases) : windows;
         }
         if (method === 'list_apps') {
           const apps = await this.backend.call<AppInfo[]>(method, args, context.signal);
@@ -112,18 +153,27 @@ export class Controller {
         const window = this.target(args.window as WindowRef); args.window = window;
         if (method === 'get_window_state') return await this.observe(window, args, context);
         if (actions.has(method)) {
+          actionWindow = window;
+          this.checkInputStop(window, context.owner, method);
+          if (method === 'type_text') {
+            if (args.method === 'paste' && !this.options.allowClipboardPaste)
+              throw new ComputerUseError('CLIPBOARD_DISABLED', 'Clipboard paste is disabled by trusted host configuration. The model cannot enable it or use another helper.');
+            args.allow_clipboard_paste = this.options.allowClipboardPaste ?? false;
+          }
           this.consume(method, args, context.owner);
           desktopEpoch++;
-          await this.backend.call(method, args, context.signal);
+          actionDispatched = true;
+          const result = await this.backend.call<{ receipt?: InputReceipt } | null>(method, args, context.signal);
           try {
             const state = await this.observe(window, {}, context);
-            return { success: true, state };
+            const receipt = result?.receipt;
+            return { success: true, state, ...(receipt ? { receipt, verification: receipt.status } : { verification: 'state_refreshed' }) };
           } catch (error) {
             this.observation = undefined;
             if (error instanceof ComputerUseError && ['ABORTED', 'TIMEOUT', 'HELPER_EXITED', 'HELPER_FAILED', 'PROTOCOL_ERROR'].includes(error.code)) {
               this.windows.clear(); this.apps.clear();
             }
-            throw new ComputerUseError('REFRESH_FAILED', `Input completed, but verification failed. Reobserve before any retry. ${error instanceof Error ? error.message : String(error)}`);
+            throw new ComputerUseError('REFRESH_FAILED', `Input was dispatched, but state refresh failed; application acceptance is unknown. Do not replay it. ${error instanceof Error ? error.message : String(error)}`);
           }
         }
         this.observation = undefined;
@@ -135,9 +185,24 @@ export class Controller {
         if (error instanceof ComputerUseError && ['ABORTED', 'TIMEOUT', 'HELPER_EXITED', 'HELPER_FAILED', 'PROTOCOL_ERROR'].includes(error.code)) {
           this.windows.clear(); this.apps.clear();
         }
+        if (error instanceof ComputerUseError) {
+          const unknownInput = actionDispatched && injected.has(method) && !zeroInputFailures.has(error.code);
+          if (actionWindow && (blockedInput.has(error.code) || uncertainInput.has(error.code) || error.code === 'REFRESH_FAILED' || actionDispatched && transportFailures.has(error.code) || unknownInput))
+            this.stopInput(actionWindow, context.owner, method, error.code);
+          const targetPrecheck = ['INPUT_TARGET_BLOCKED', 'INPUT_IDENTITY_UNAVAILABLE'].includes(error.code) && ['type_text', 'press_key'].includes(method);
+          const notSent = !actionDispatched || injected.has(method) && (zeroInputFailures.has(error.code) || targetPrecheck);
+          throw new ComputerUseError(error.code, error.message, {
+            native_request_dispatched: actionDispatched, input_outcome: notSent ? 'not_sent' : 'unknown', ...error.details,
+          });
+        }
+        if (actionWindow && actionDispatched && injected.has(method)) {
+          this.stopInput(actionWindow, context.owner, method, 'BACKEND_ERROR');
+          throw new ComputerUseError('BACKEND_ERROR', error instanceof Error ? error.message : 'The input backend failed with an unknown outcome.',
+            { native_request_dispatched: true, input_outcome: 'unknown' });
+        }
         throw error;
       }
     });
   }
-  dispose() { this.disposed = true; this.observation = undefined; return this.backend.close(); }
+  dispose() { this.disposed = true; this.observation = undefined; this.inputStops.clear(); return this.backend.close(); }
 }

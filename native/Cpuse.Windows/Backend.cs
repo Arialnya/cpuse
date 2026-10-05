@@ -6,7 +6,7 @@ using Microsoft.Win32;
 
 namespace Cpuse.Windows;
 
-internal sealed record TargetWindow(long id, string app, string? title);
+internal sealed record TargetWindow(long id, string app, string? title, string process_name = "", string class_name = "", bool is_minimized = false, bool is_foreground = false);
 internal sealed record WindowBinding(nint Handle, uint Pid, long Started, string App);
 internal sealed record CachedScreenshot(string Id, nint Handle, Win32.RECT Bounds, int Width, int Height);
 internal sealed class Observation
@@ -16,12 +16,14 @@ internal sealed class Observation
     internal required Win32.RECT Bounds { get; init; }
     internal Dictionary<int, AutomationElement> Elements { get; } = new();
     internal Dictionary<string, CachedScreenshot> Screenshots { get; } = new();
+    internal nint KnownPasswordFocus { get; set; }
 }
 
 internal sealed partial class Backend
 {
     private readonly Dictionary<long, WindowBinding> bindings = new();
     private readonly Dictionary<long, Observation> observations = new();
+    private readonly Dictionary<long, VerifiedClick> verifiedClicks = new();
     private readonly Dictionary<string, string> launchable = new(StringComparer.OrdinalIgnoreCase);
     private const int MaxElements = 1500;
     private readonly TimeSpan maximumAge = TimeSpan.FromSeconds(120);
@@ -36,8 +38,8 @@ internal sealed partial class Backend
         "get_window_state" => GetWindowState(p),
         "activate_window" => Act(p, b => Activate(b), false),
         "click" => Act(p, b => Click(b, p)),
-        "press_key" => Act(p, b => PressKey(b, p)),
-        "type_text" => Act(p, b => TypeText(b, p)),
+        "press_key" => ActResult(p, b => PressKey(b, p)),
+        "type_text" => ActResult(p, b => TypeText(b, p)),
         "scroll" => Act(p, b => Scroll(b, p)),
         "set_value" => Act(p, b => SetValue(b, p)),
         "drag" => Act(p, b => Drag(b, p)),
@@ -52,13 +54,14 @@ internal sealed partial class Backend
         {
             if (!Win32.IsWindowVisible(hwnd) || Win32.GetAncestor(hwnd, 2) != hwnd) return true;
             if (Win32.DwmGetWindowAttribute(hwnd, 14, out int cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
-            if (string.IsNullOrWhiteSpace(Win32.Title(hwnd))) return true;
+            // Untitled fullscreen/game windows are still real, visible windows.
+            // Their process path and class provide identity without guessing HWNDs.
             try { var binding = Bind(hwnd); result.Add(ToWindow(binding)); }
             catch (RpcError) { /* Inaccessible processes cannot be safely bound. */ }
             return true;
         }, 0);
         var existing = result.Select(x => x.id).ToHashSet();
-        foreach (var id in bindings.Keys.Where(x => !existing.Contains(x) && !Win32.IsWindow(new nint(x))).ToArray()) { bindings.Remove(id); observations.Remove(id); }
+        foreach (var id in bindings.Keys.Where(x => !existing.Contains(x) && !Win32.IsWindow(new nint(x))).ToArray()) { bindings.Remove(id); observations.Remove(id); verifiedClicks.Remove(id); }
         return result;
     }
 
@@ -67,13 +70,13 @@ internal sealed partial class Backend
         if (!Win32.IsWindow(hwnd)) throw new RpcError("WINDOW_CLOSED", "Window is no longer open.");
         var identity = Win32.ProcessIdentity(hwnd);
         var id = hwnd.ToInt64();
-        if (bindings.TryGetValue(id, out var previous) && (previous.Pid != identity.Pid || previous.Started != identity.Started)) observations.Remove(id);
+        if (bindings.TryGetValue(id, out var previous) && (previous.Pid != identity.Pid || previous.Started != identity.Started)) { observations.Remove(id); verifiedClicks.Remove(id); }
         var binding = new WindowBinding(hwnd, identity.Pid, identity.Started, identity.App);
         bindings[id] = binding;
         return binding;
     }
 
-    private static TargetWindow ToWindow(WindowBinding b) => new(b.Handle.ToInt64(), b.App, Win32.Title(b.Handle));
+    private static TargetWindow ToWindow(WindowBinding b) => new(b.Handle.ToInt64(), b.App, Win32.Title(b.Handle), Path.GetFileNameWithoutExtension(b.App), Win32.ClassName(b.Handle), Win32.IsIconic(b.Handle), IsRelated(Win32.GetForegroundWindow(), b.Handle));
     private WindowBinding Validate(JsonElement window)
     {
         var id = Long(window, "id");
@@ -162,7 +165,13 @@ internal sealed partial class Backend
         var before = Win32.Bounds(b.Handle);
         var observation = new Observation { Id = Guid.NewGuid().ToString("N"), Time = DateTimeOffset.UtcNow, Bounds = before };
         object? accessibility = null;
-        if (Bool(p, "include_text", false)) accessibility = ReadAccessibility(b, observation);
+        if (Bool(p, "include_text", false))
+        {
+            try { accessibility = ReadAccessibility(b, observation); }
+            catch (ElementNotAvailableException) { }
+            catch (InvalidOperationException) { }
+            catch (COMException) { }
+        }
         var screenshots = new List<object>();
         if (Bool(p, "include_screenshot", true))
         {
@@ -187,7 +196,7 @@ internal sealed partial class Backend
         var after = Win32.Bounds(b.Handle);
         if (!EqualRect(before, after)) throw new RpcError("WINDOW_CHANGED", "Window moved or resized while observing it; retry get_window_state.");
         observations[b.Handle.ToInt64()] = observation;
-        return new { window = ToWindow(b), observation_id = observation.Id, captured_at = observation.Time.ToString("O"), accessibility, screenshots, dpi = Win32.GetDpiForWindow(b.Handle), coordinate_space = "physical-pixels" };
+        return new { window = ToWindow(b), observation_id = observation.Id, captured_at = observation.Time.ToString("O"), accessibility, screenshots, input = InputDiagnostics(b, observation, Bool(p, "allow_clipboard_paste", false), Bool(p, "include_text", false)), dpi = Win32.GetDpiForWindow(b.Handle), coordinate_space = "physical-pixels" };
     }
 
     private object? Act(JsonElement p, Action<WindowBinding> action, bool requiresObservation = true)
@@ -196,6 +205,14 @@ internal sealed partial class Backend
         var b = Validate(p.GetProperty("window"));
         if (requiresObservation || p.TryGetProperty("observation_id", out _)) Fresh(b, p);
         try { action(b); return null; }
+        finally { observations.Remove(b.Handle.ToInt64()); }
+    }
+    private object? ActResult(JsonElement p, Func<WindowBinding, object> action)
+    {
+        Win32.RequireDesktop();
+        var b = Validate(p.GetProperty("window"));
+        Fresh(b, p);
+        try { return action(b); }
         finally { observations.Remove(b.Handle.ToInt64()); }
     }
     private Observation Fresh(WindowBinding b, JsonElement p)

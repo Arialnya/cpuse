@@ -1,17 +1,60 @@
 {
   "name": "dsh-plugin-cpuse",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Windows computer control for DeepSeek Harness: window binding, UIA, SendInput and WGC",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
-  "exports": { ".": { "types": "./lib/index.d.ts", "import": "./lib/index.js" }, "./client": { "types": "./lib/client.d.ts", "import": "./lib/client.js" } },
-  "files": ["lib/**/*.js", "lib/**/*.d.ts", "lib/native/*.exe", "lib/native/*.dll", "lib/native/*.json", "native/Cpuse.Windows/*.cs", "native/Cpuse.Windows/*.csproj", "src", "tsconfig.json", "scripts/build-native.ps1", "scripts/test-native.mjs", "cordis.patch.yml", "docs", "examples", "README.md", "LICENSE"],
-  "engines": { "node": "^22.19.0 || >=24.0.0" },
-  "os": ["win32"],
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "import": "./lib/client.js"
+    }
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "lib/native/*.exe",
+    "lib/native/*.dll",
+    "lib/native/*.json",
+    "native/Cpuse.Windows/*.cs",
+    "native/Cpuse.Windows/*.csproj",
+    "src",
+    "tsconfig.json",
+    "scripts/build-native.ps1",
+    "scripts/test-native.mjs",
+    "scripts/download-release.mjs",
+    "scripts/release-manifest.mjs",
+    "scripts/repair-lockfile.mjs",
+    "cordis.patch.yml",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "os": [
+    "win32"
+  ],
   "license": "MIT",
-  "keywords": ["deepseek-harness", "dsh-plugin", "cordis", "computer-use", "windows"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "computer-use",
+    "windows"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -20,6 +63,9 @@
     "test": "npm run build && node --test tests/*.test.mjs",
     "test:native": "node scripts/test-native.mjs",
     "test:desktop": "node scripts/test-native.mjs --desktop",
+    "test:install": "node --test tests/installation.test.mjs",
+    "release:manifest": "node scripts/release-manifest.mjs",
+    "repair:lockfile": "node scripts/repair-lockfile.mjs",
     "prepack": "npm run build:all"
   },
   "dependencies": {
@@ -28,12 +74,22 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-computer-use": "0.2.0-rc.2",
     "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-computer-use": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
   },
-  "peerDependenciesMeta": { "@deepseek-ai/dsh-computer-use": { "optional": true } },
-  "devDependencies": { "@deepseek-ai/dsh-tools": "0.2.0-rc.2", "@deepseek-ai/dsh-computer-use": "0.2.0-rc.2", "@types/node": "^24.0.0", "typescript": "^5.9.0" }
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-computer-use": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-computer-use": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "yaml": "2.9.0"
+  }
 }

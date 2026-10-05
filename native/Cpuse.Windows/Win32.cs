@@ -13,6 +13,7 @@ internal static class Win32
     [StructLayout(LayoutKind.Explicit)] internal struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT Mouse; [FieldOffset(0)] public KEYBDINPUT Keyboard; }
     [StructLayout(LayoutKind.Sequential)] internal struct MOUSEINPUT { public int Dx, Dy; public uint MouseData, Flags, Time; public nuint ExtraInfo; }
     [StructLayout(LayoutKind.Sequential)] internal struct KEYBDINPUT { public ushort Vk, Scan; public uint Flags, Time; public nuint ExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] internal struct GUITHREADINFO { public uint Size, Flags; public nint Active, Focus, Capture, MenuOwner, MoveSize, Caret; public RECT CaretBounds; }
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumWindowsProc callback, nint param);
     [DllImport("user32.dll")] internal static extern bool IsWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(nint hwnd);
@@ -28,6 +29,14 @@ internal static class Win32
     [DllImport("user32.dll")] internal static extern bool ShowWindow(nint hwnd, int command);
     [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] internal static extern nint SetFocus(nint hwnd);
+    [DllImport("user32.dll", SetLastError = true)] internal static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(nint hwnd, StringBuilder name, int count);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] internal static extern int GetWindowStyle(nint hwnd, int index);
+    [DllImport("user32.dll", SetLastError = true)] internal static extern nint SendMessageTimeout(nint hwnd, uint message, nuint wParam, nint lParam, uint flags, uint timeout, out nuint result);
+    [DllImport("user32.dll")] internal static extern nint GetKeyboardLayout(uint thread);
+    [DllImport("user32.dll")] internal static extern uint MapVirtualKeyEx(uint code, uint type, nint layout);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern short VkKeyScanEx(char ch, nint layout);
     [DllImport("user32.dll")] internal static extern bool BringWindowToTop(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool AttachThreadInput(uint from, uint to, bool attach);
     [DllImport("user32.dll")] internal static extern bool SetProcessDpiAwarenessContext(nint value);
@@ -39,8 +48,8 @@ internal static class Win32
     [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", SetLastError = true)] internal static extern uint SendInput(uint count, INPUT[] inputs, int size);
-    [DllImport("user32.dll")] internal static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] internal static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", SetLastError = true)] internal static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] internal static extern short VkKeyScan(char ch);
     [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] internal static extern bool PrintWindow(nint hwnd, nint hdc, uint flags);
@@ -63,23 +72,38 @@ internal static class Win32
     /// <summary>Step-by-step token read, so an unexpected sandbox token reports why instead of guessing.</summary>
     internal static (string Name, string Detail) IntegrityDiagnostic()
     {
-        if (!OpenProcessToken(GetCurrentProcess(), 0x0008, out var token))
-            return ("unknown", $"OpenProcessToken failed with {Marshal.GetLastWin32Error()}");
+        var integrity = ProcessIntegrity(GetCurrentProcess());
+        return (integrity.Name, integrity.Detail);
+    }
+
+    internal static (int? Rid, string Name, string Detail) WindowIntegrity(nint hwnd)
+    {
+        GetWindowThreadProcessId(hwnd, out var pid);
+        var process = OpenProcess(0x1000, false, pid);
+        if (process == 0) return (null, "unknown", $"OpenProcess({pid}) failed with {Marshal.GetLastWin32Error()}");
+        try { return ProcessIntegrity(process); }
+        finally { CloseHandle(process); }
+    }
+
+    internal static (int? Rid, string Name, string Detail) ProcessIntegrity(nint process)
+    {
+        if (!OpenProcessToken(process, 0x0008, out var token))
+            return (null, "unknown", $"OpenProcessToken failed with {Marshal.GetLastWin32Error()}");
         try
         {
             var probed = GetTokenInformation(token, 25, 0, 0, out var length);
             if (length <= 0)
-                return ("unknown", probed ? "GetTokenInformation(TokenIntegrityLevel) reported an empty size" : $"GetTokenInformation size probe failed with {Marshal.GetLastWin32Error()}");
+                return (null, "unknown", probed ? "GetTokenInformation(TokenIntegrityLevel) reported an empty size" : $"GetTokenInformation size probe failed with {Marshal.GetLastWin32Error()}");
             var buffer = Marshal.AllocHGlobal(length);
             try
             {
                 if (!GetTokenInformation(token, 25, buffer, length, out _))
-                    return ("unknown", $"GetTokenInformation(TokenIntegrityLevel) failed with {Marshal.GetLastWin32Error()}");
+                    return (null, "unknown", $"GetTokenInformation(TokenIntegrityLevel) failed with {Marshal.GetLastWin32Error()}");
                 var sid = Marshal.ReadIntPtr(buffer);
                 var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
-                if (count == 0) return ("unknown", "integrity SID has no sub-authority");
+                if (count == 0) return (null, "unknown", "integrity SID has no sub-authority");
                 var rid = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
-                return (switchName(rid), $"integrity RID 0x{rid:X}");
+                return (rid, switchName(rid), $"integrity RID 0x{rid:X}");
             }
             finally { Marshal.FreeHGlobal(buffer); }
         }
@@ -99,6 +123,7 @@ internal static class Win32
     };
 
     internal static string Title(nint hwnd) { var text = new StringBuilder(Math.Max(256, GetWindowTextLength(hwnd) + 1)); GetWindowText(hwnd, text, text.Capacity); return text.ToString(); }
+    internal static string ClassName(nint hwnd) { var text = new StringBuilder(256); GetClassName(hwnd, text, text.Capacity); return text.ToString(); }
     internal static bool DpiAware => AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new nint(-4));
     internal static void RequireDesktop()
     {
@@ -132,11 +157,14 @@ internal static class Win32
         if (!GetWindowRect(hwnd, out var rect)) throw new RpcError("WINDOW_CLOSED", "Window has disappeared.");
         return rect;
     }
-    internal static void Send(params INPUT[] inputs)
+    internal static uint Send(params INPUT[] inputs)
     {
-        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) != inputs.Length)
-            throw new RpcError("INPUT_BLOCKED", "SendInput was blocked; check window privileges and the interactive desktop.");
+        Marshal.SetLastPInvokeError(0);
+        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (sent == inputs.Length) return sent;
+        if (sent > 0) throw new RpcError("INPUT_PARTIAL", $"SendInput queued {sent} of {inputs.Length} events; part of the action may have happened. Do not replay it. Observe the selected window before deciding what remains.");
+        throw new RpcError("INPUT_BLOCKED", $"SendInput queued no events (Win32 error {Marshal.GetLastWin32Error()}). Windows does not identify UIPI through this return value; do not change privileges or retry outside the plugin.");
     }
-    internal static INPUT Key(ushort vk, bool up = false, ushort scan = 0, bool unicode = false, bool extended = false) => new() { Type = 1, Data = new INPUTUNION { Keyboard = new KEYBDINPUT { Vk = vk, Scan = scan, Flags = (up ? 2u : 0u) | (unicode ? 4u : 0u) | (extended ? 1u : 0u) } } };
+    internal static INPUT Key(ushort vk, bool up = false, ushort scan = 0, bool unicode = false, bool extended = false, bool scanCode = false) => new() { Type = 1, Data = new INPUTUNION { Keyboard = new KEYBDINPUT { Vk = scanCode ? (ushort)0 : vk, Scan = scan, Flags = (up ? 2u : 0u) | (unicode ? 4u : 0u) | (extended ? 1u : 0u) | (scanCode ? 8u : 0u) } } };
     internal static INPUT Mouse(uint flags, uint data = 0) => new() { Type = 0, Data = new INPUTUNION { Mouse = new MOUSEINPUT { Flags = flags, MouseData = data } } };
 }

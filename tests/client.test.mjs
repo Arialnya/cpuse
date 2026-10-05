@@ -78,3 +78,43 @@ test('launch and disposal invalidate the cached facade state', windowsOnly, asyn
   client.dispose();
   await assert.rejects(client.list_windows(), { code: 'CLOSED' });
 });
+
+test('the facade finds an actual window through a host alias before observing it', windowsOnly, async t => {
+  const client = setup(t, { windowAliases: [{ name: '测试编辑器', terms: ['Fixture editor'] }] });
+  const found = await client.find_window({ query: '测试编辑器' });
+  assert.equal(found.matched, true);
+  assert.equal(found.windows.length, 1);
+  assert.equal(found.windows[0].id, 101);
+  assert.equal(client.lastState, undefined, 'Discovery is not an input observation.');
+  await client.get_window_state({ window: found.windows[0] });
+  await client.press_key({ window: found.windows[0], key: 'Return', mode: 'scan-code' });
+  const calls = (await client.capabilities()).fixture_calls;
+  assert.deepEqual(calls.slice(0, 3).map(call => call.method), ['list_windows', 'get_window_state', 'press_key']);
+  assert.equal(calls[2].params.mode, 'scan-code');
+  assert.equal(calls.some(call => call.method === 'find_window'), false, 'Aliases are resolved against discovered native windows.');
+});
+
+test('the facade forwards explicit input modes while host configuration owns clipboard permission', windowsOnly, async t => {
+  const client = setup(t, { allowClipboardPaste: true });
+  const [window] = await client.list_windows();
+  await client.get_window_state({ window });
+  await client.press_key({ window, key: 'a', mode: 'virtual-key' });
+  await client.type_text({ window, text: 'literal text', method: 'paste', allow_clipboard_paste: false });
+  const calls = (await client.capabilities()).fixture_calls;
+  const key = calls.find(call => call.method === 'press_key');
+  const text = calls.find(call => call.method === 'type_text');
+  assert.equal(key.params.mode, 'virtual-key');
+  assert.equal(text.params.method, 'paste');
+  assert.equal(text.params.allow_clipboard_paste, true);
+  assert.equal(text.params.observation_id, 'observation-2');
+});
+
+test('a model-like facade argument cannot enable disabled clipboard paste', windowsOnly, async t => {
+  const client = setup(t);
+  const [window] = await client.list_windows();
+  await client.get_window_state({ window });
+  await assert.rejects(client.type_text({ window, text: 'literal text', method: 'paste', allow_clipboard_paste: true }), { code: 'CLIPBOARD_DISABLED' });
+  assert.equal(client.lastState, undefined);
+  const calls = (await client.capabilities()).fixture_calls;
+  assert.equal(calls.filter(call => call.method === 'type_text').length, 0);
+});

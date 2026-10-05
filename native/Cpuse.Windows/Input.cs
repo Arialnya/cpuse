@@ -31,6 +31,9 @@ internal sealed partial class Backend
         if (!IsRelated(Win32.GetForegroundWindow(), b.Handle)) throw new RpcError("FOCUS_CHANGED", "Foreground window changed before input.");
         var actual = Win32.ProcessIdentity(b.Handle);
         if (actual.Pid != b.Pid || actual.Started != b.Started) throw new RpcError("WINDOW_REPLACED", "Window process identity changed before input.");
+        Injection.RequireTarget(b.Handle);
+        var foreground = Win32.GetForegroundWindow();
+        if (foreground != b.Handle) Injection.RequireTarget(foreground);
     }
 
     private Win32.POINT Coordinate(WindowBinding b, JsonElement p, string xName, string yName)
@@ -85,8 +88,10 @@ internal sealed partial class Backend
         var button = p.TryGetProperty("mouse_button", out var buttonValue) ? buttonValue.GetString() : "left";
         var flags = button?.ToLowerInvariant() switch { "left" or "l" => (2u, 4u), "right" or "r" => (8u, 16u), "middle" or "m" => (32u, 64u), _ => throw new RpcError("INVALID_ARGUMENT", "mouse_button must be left, right, or middle.") };
         Injection.Require("click");
+        Injection.RequireTarget(b.Handle);
         Activate(b); HitTest(b, point); Move(point); Injection.VerifyPointer(point);
         for (var i = 0; i < count; i++) { HitTest(b, point); Win32.Send(Win32.Mouse(flags.Item1), Win32.Mouse(flags.Item2)); if (i + 1 < count) Thread.Sleep(55); }
+        RecordVerifiedClick(b);
     }
     private void Scroll(WindowBinding b, JsonElement p)
     {
@@ -94,6 +99,7 @@ internal sealed partial class Backend
         var dx = Number(p, "scrollX"); var dy = Number(p, "scrollY");
         if (Math.Abs(dx) > 100_000 || Math.Abs(dy) > 100_000) throw new RpcError("INVALID_ARGUMENT", "Scroll deltas exceed 100000 wheel units.");
         Injection.Require("scroll");
+        Injection.RequireTarget(b.Handle);
         Activate(b); HitTest(b, point); Move(point); Injection.VerifyPointer(point);
         if (dy != 0) Win32.Send(Win32.Mouse(0x0800, unchecked((uint)-(int)Math.Round(dy))));
         if (dx != 0) Win32.Send(Win32.Mouse(0x1000, unchecked((uint)(int)Math.Round(dx))));
@@ -102,6 +108,7 @@ internal sealed partial class Backend
     {
         var from = Coordinate(b, p, "from_x", "from_y"); var to = Coordinate(b, p, "to_x", "to_y");
         Injection.Require("drag");
+        Injection.RequireTarget(b.Handle);
         Activate(b); HitTest(b, from); HitTest(b, to);
         var inputs = new List<Win32.INPUT> { MoveInput(from), Win32.Mouse(2) };
         for (var i = 1; i <= 24; i++) inputs.Add(MoveInput(new Win32.POINT(from.X + (to.X - from.X) * i / 24, from.Y + (to.Y - from.Y) * i / 24)));
@@ -116,57 +123,134 @@ internal sealed partial class Backend
     {
         foreach (var vk in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C }) if ((Win32.GetAsyncKeyState(vk) & 0x8000) != 0) throw new RpcError("KEYBOARD_BUSY", "A physical modifier is pressed; no keyboard input was sent.");
     }
-    private void TypeText(WindowBinding b, JsonElement p)
+    private object TypeText(WindowBinding b, JsonElement p)
     {
         var text = String(p, "text");
-        if (text.Length > 1_000_000) throw new RpcError("INVALID_ARGUMENT", "Text exceeds one million UTF-16 code units.");
+        if (text.Length == 0 || text.Length > 1_000_000) throw new RpcError("INVALID_ARGUMENT", "Text must contain 1 to one million UTF-16 code units.");
+        var method = p.TryGetProperty("method", out var specified) ? specified.GetString() : "unicode";
+        if (method is not ("unicode" or "paste")) throw new RpcError("INVALID_ARGUMENT", "type_text method must be unicode or paste.");
+        if (method == "paste" && !Bool(p, "allow_clipboard_paste", false)) throw new RpcError("CLIPBOARD_UNAVAILABLE", "Clipboard paste is disabled by the trusted host configuration. No input or clipboard changes were made.");
         Injection.Require("type_text");
+        Injection.RequireTarget(b.Handle);
         Activate(b); EnsureModifiersReleased();
-        var focused = AutomationElement.FocusedElement;
-        if (focused == null || !BelongsTo(focused, b.Handle)) throw new RpcError("FOCUS_FAILED", "Keyboard focus is not inside the selected window.");
-        if (focused.Current.IsPassword) throw new RpcError("PASSWORD_INPUT_FORBIDDEN", "Password elements cannot receive text through this plugin.");
-        var batch = new List<Win32.INPUT>(512);
-        for (var offset = 0; offset < text.Length; offset++)
+        var focused = RequireTextFocus(b);
+        var before = ReadFocusedText(focused);
+        uint queued = 0;
+        var sendAttempted = false;
+        ClipboardTransaction? clipboard = null;
+        try
         {
-            var character = text[offset];
-            if (character is '\r' or '\n')
+            if (method == "paste")
             {
-                // Edit/RichEdit providers ignore a WM_CHAR LF from VK_PACKET.
-                // A paired Return input creates the newline, collapsing CRLF.
-                batch.Add(Win32.Key(0x0D)); batch.Add(Win32.Key(0x0D, up: true));
-                if (character == '\r' && offset + 1 < text.Length && text[offset + 1] == '\n') offset++;
+                clipboard = ClipboardTransaction.Begin(text);
+                Fresh(b, p); RequireSameTextFocus(b, focused); EnsureModifiersReleased();
+                clipboard.RequireCurrent();
+                sendAttempted = true;
+                queued += Win32.Send(Win32.Key(0x11), Win32.Key(0x56), Win32.Key(0x56, up: true), Win32.Key(0x11, up: true));
             }
-            else { batch.Add(Win32.Key(0, scan: character, unicode: true)); batch.Add(Win32.Key(0, up: true, scan: character, unicode: true)); }
-            if (batch.Count >= 512 || offset + 1 == text.Length)
+            else
             {
-                EnsureForeground(b);
-                var currentFocus = AutomationElement.FocusedElement;
-                if (currentFocus == null || !BelongsTo(currentFocus, b.Handle)) throw new RpcError("FOCUS_CHANGED", "Text focus moved outside the selected window.");
-                if (currentFocus.Current.IsPassword) throw new RpcError("PASSWORD_INPUT_FORBIDDEN", "Text focus moved to a password element.");
-                Win32.Send(batch.ToArray()); batch.Clear();
+                var batch = new List<Win32.INPUT>(516);
+                for (var offset = 0; offset < text.Length; offset++)
+                {
+                    var character = text[offset];
+                    if (character is '\r' or '\n')
+                    {
+                        batch.Add(Win32.Key(0x0D)); batch.Add(Win32.Key(0x0D, up: true));
+                        if (character == '\r' && offset + 1 < text.Length && text[offset + 1] == '\n') offset++;
+                    }
+                    else { batch.Add(Win32.Key(0, scan: character, unicode: true)); batch.Add(Win32.Key(0, up: true, scan: character, unicode: true)); }
+                    // Keep a supplementary Unicode character in the same batch.
+                    if ((batch.Count >= 512 && !(char.IsHighSurrogate(character) && offset + 1 < text.Length && char.IsLowSurrogate(text[offset + 1]))) || offset + 1 == text.Length)
+                    {
+                        Fresh(b, p); RequireSameTextFocus(b, focused); EnsureModifiersReleased();
+                        sendAttempted = true;
+                        queued += Win32.Send(batch.ToArray()); batch.Clear();
+                    }
+                }
+            }
+            var changed = false;
+            for (var i = 0; i < 12; i++)
+            {
+                Thread.Sleep(25);
+                RequireSameTextFocus(b, focused);
+                var current = ReadFocusedText(focused);
+                if (before != null && current != null && current != before) { changed = true; break; }
+            }
+            clipboard?.Restore();
+            if (!changed && before != null && !NormalizeNewlines(before).Contains(NormalizeNewlines(text), StringComparison.Ordinal))
+                throw new RpcError("INPUT_NOT_ACCEPTED", "Text events were queued once, but the focused provider's readable text did not change within 300 ms. The application may ignore this method or update asynchronously. Stop the text channel and report the uncertain outcome. Observation remains available; a human must decide any explicit UIA replacement. Do not replay through Unicode, paste, another input channel, or changed privileges.");
+            return new { receipt = new { method, status = changed ? "text_changed" : "queued_unverified", events_queued = queued, retry_safe = false } };
+        }
+        catch (Exception error) when (queued > 0 && error is not RpcError { Code: "INPUT_NOT_ACCEPTED" or "INPUT_PARTIAL" or "CLIPBOARD_CHANGED" })
+        {
+            var cause = error is RpcError rpc ? rpc.Code : error.GetType().Name;
+            throw new RpcError("INPUT_OUTCOME_UNKNOWN", $"{queued} text input events were already queued before {cause}. Part or all of the text may have been applied. Do not replay; refresh and inspect the selected window.");
+        }
+        finally
+        {
+            try { clipboard?.Dispose(); }
+            catch (RpcError error) when (sendAttempted && error.Code != "CLIPBOARD_CHANGED")
+            {
+                throw new RpcError("INPUT_OUTCOME_UNKNOWN", $"Input submission was attempted and clipboard cleanup failed ({error.Code}). Its delivery count may be partial or unavailable. Paste may have happened and clipboard restoration needs user attention. Do not replay.");
             }
         }
     }
-    private void PressKey(WindowBinding b, JsonElement p)
+    private static string? ReadFocusedText(FocusSnapshot focus)
+    {
+        try
+        {
+            var element = focus.Element;
+            if (element == null || element.Current.IsPassword) return null;
+            if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var value)) return ((ValuePattern)value).Current.Value;
+            if (element.TryGetCurrentPattern(TextPattern.Pattern, out var text)) return NormalizeNewlines(((TextPattern)text).DocumentRange.GetText(100_000));
+        }
+        catch (ElementNotAvailableException) { }
+        catch (InvalidOperationException) { }
+        catch (System.Runtime.InteropServices.COMException) { }
+        return null;
+    }
+
+    private object PressKey(WindowBinding b, JsonElement p)
     {
         var chord = String(p, "key").Split('+', StringSplitOptions.TrimEntries);
         if (chord.Length == 0 || chord.Length > 8 || chord.Any(string.IsNullOrWhiteSpace)) throw new RpcError("INVALID_KEY", "Use keysym names separated by +; name the + character as plus.");
         Injection.Require("press_key");
+        Injection.RequireTarget(b.Handle);
+        var mode = p.TryGetProperty("mode", out var specifiedMode) ? specifiedMode.GetString() : "virtual-key";
+        if (mode is not ("virtual-key" or "scan-code")) throw new RpcError("INVALID_ARGUMENT", "press_key mode must be virtual-key or scan-code.");
+        Activate(b); EnsureModifiersReleased(); EnsureForeground(b);
+        var observed = Fresh(b, p);
+        var focus = ReadFocus(b, includeUia: false, allowClickedGame: mode == "scan-code");
+        if (!focus.InWindow) throw new RpcError("FOCUS_FAILED", "Win32 keyboard focus is not inside the selected window; no key was sent.");
+        if (focus.Password == "yes" || observed.KnownPasswordFocus == focus.Handle) throw new RpcError("PASSWORD_INPUT_FORBIDDEN", "A password control has keyboard focus; no key was sent.");
+        Injection.RequireTarget(focus.Handle);
+        var layout = Win32.GetKeyboardLayout(Win32.GetWindowThreadProcessId(focus.Handle, out _));
         var keys = new List<(ushort Vk, bool Extended)>();
         foreach (var key in chord)
         {
-            var resolved = ResolveKey(key);
+            var resolved = ResolveKey(key, layout);
             foreach (var modifier in resolved.Modifiers)
                 if (!keys.Any(x => x.Vk == modifier)) keys.Add((modifier, false));
             if (!keys.Any(x => x.Vk == resolved.Vk)) keys.Add((resolved.Vk, resolved.Extended));
         }
-        Activate(b); EnsureModifiersReleased(); EnsureForeground(b);
-        var downs = keys.Select(x => Win32.Key(x.Vk, extended: x.Extended)).ToArray();
-        var ups = keys.AsEnumerable().Reverse().Select(x => Win32.Key(x.Vk, up: true, extended: x.Extended)).ToArray();
-        Win32.Send(downs.Concat(ups).ToArray());
+        Win32.INPUT KeyInput((ushort Vk, bool Extended) key, bool up)
+        {
+            if (mode == "virtual-key") return Win32.Key(key.Vk, up: up, extended: key.Extended);
+            var scan = Win32.MapVirtualKeyEx(key.Vk, 4, layout);
+            if ((scan & 0xFF) == 0 || (scan & 0xFF00) == 0xE100) throw new RpcError("INVALID_KEY", "This key has no supported single scan code on the target keyboard layout; use virtual-key mode if appropriate.");
+            return Win32.Key(0, up: up, scan: (ushort)(scan & 0xFF), extended: (scan & 0xFF00) == 0xE000 || key.Extended, scanCode: true);
+        }
+        var downs = keys.Select(x => KeyInput(x, false)).ToArray();
+        var ups = keys.AsEnumerable().Reverse().Select(x => KeyInput(x, true)).ToArray();
+        Fresh(b, p); EnsureForeground(b);
+        var now = ReadFocus(b, includeUia: false, allowClickedGame: mode == "scan-code");
+        if (!now.InWindow || now.Handle != focus.Handle) throw new RpcError("FOCUS_CHANGED", "Win32 keyboard focus changed before the key chord; no key was sent.");
+        var queued = Win32.Send(downs.Concat(ups).ToArray());
+        return new { receipt = new { method = mode, status = "queued_unverified", events_queued = queued, retry_safe = false } };
     }
 
-    private static (ushort Vk, bool Extended, ushort[] Modifiers) ResolveKey(string key)
+    private static (ushort Vk, bool Extended, ushort[] Modifiers) ResolveKey(string key, nint layout)
     {
         if (System.Text.RegularExpressions.Regex.IsMatch(key, @"^(meta|windows|win|cmd|command|super|os)(_[lr])?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             throw new RpcError("SYSTEM_KEY_FORBIDDEN", "Windows/Meta/Super keys are forbidden by the window-scoped input policy.");
@@ -187,14 +271,14 @@ internal sealed partial class Backend
             ["KP_Multiply"] = 0x6A, ["Numpad_Multiply"] = 0x6A, ["KP_Divide"] = 0x6F, ["Numpad_Divide"] = 0x6F,
             ["KP_Decimal"] = 0x6E, ["Numpad_Decimal"] = 0x6E, ["Numpad_Enter"] = 0x0D
         };
-        if (names.TryGetValue(key, out var code)) return (code, key.EndsWith("_R", StringComparison.OrdinalIgnoreCase) && code != 0xA1 || code is >= 0x21 and <= 0x2E || key.Equals("KP_Enter", StringComparison.OrdinalIgnoreCase) || code == 0x6F, Array.Empty<ushort>());
+        if (names.TryGetValue(key, out var code)) return (code, key.EndsWith("_R", StringComparison.OrdinalIgnoreCase) && code != 0xA1 || code is >= 0x21 and <= 0x2E || key.Equals("KP_Enter", StringComparison.OrdinalIgnoreCase) || key.Equals("Numpad_Enter", StringComparison.OrdinalIgnoreCase) || code == 0x6F, Array.Empty<ushort>());
         if (key.StartsWith("F", StringComparison.OrdinalIgnoreCase) && int.TryParse(key[1..], out var f) && f is >= 1 and <= 24) return ((ushort)(0x70 + f - 1), false, Array.Empty<ushort>());
         var digit = key.StartsWith("KP_", StringComparison.OrdinalIgnoreCase) ? key[3..] : key.StartsWith("Numpad_", StringComparison.OrdinalIgnoreCase) ? key[7..] : "";
         if (digit.Length == 1 && char.IsAsciiDigit(digit[0])) return ((ushort)(0x60 + digit[0] - '0'), false, Array.Empty<ushort>());
         var symbols = new Dictionary<string, char>(StringComparer.OrdinalIgnoreCase) { ["period"] = '.', ["greater"] = '>', ["comma"] = ',', ["less"] = '<', ["slash"] = '/', ["backslash"] = '\\', ["semicolon"] = ';', ["colon"] = ':', ["apostrophe"] = '\'', ["quotedbl"] = '"', ["bracketleft"] = '[', ["bracketright"] = ']', ["braceleft"] = '{', ["braceright"] = '}', ["minus"] = '-', ["underscore"] = '_', ["equal"] = '=', ["plus"] = '+', ["grave"] = '`', ["asciitilde"] = '~', ["exclam"] = '!', ["question"] = '?', ["at"] = '@', ["numbersign"] = '#', ["dollar"] = '$', ["percent"] = '%', ["asciicircum"] = '^', ["ampersand"] = '&', ["asterisk"] = '*', ["parenleft"] = '(', ["parenright"] = ')' };
         var ch = symbols.TryGetValue(key, out var symbol) ? symbol : key.Length == 1 ? key[0] : '\0';
         if (ch == '\0') throw new RpcError("INVALID_KEY", $"Unsupported keysym: {key}");
-        var scan = Win32.VkKeyScan(ch);
+        var scan = Win32.VkKeyScanEx(ch, layout);
         if (scan == -1) throw new RpcError("INVALID_KEY", $"No key mapping exists for {key}; use type_text for Unicode text.");
         var modifiers = new List<ushort>();
         if ((scan & 0x100) != 0) modifiers.Add(0x10);

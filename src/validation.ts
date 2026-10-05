@@ -20,7 +20,8 @@ export function windowRef(value: unknown): WindowRef {
 export function validate(method: Method, value: unknown): Record<string, unknown> {
   const args = record(value);
   const output: Record<string, unknown> = {};
-  if (!['list_apps', 'list_windows', 'launch_app', 'get_window', 'capabilities'].includes(method)) output.window = windowRef(args.window);
+  if (!['list_apps', 'list_windows', 'find_window', 'launch_app', 'get_window', 'capabilities'].includes(method)) output.window = windowRef(args.window);
+  if (method === 'find_window') output.query = string(args.query, 'query', 256);
   if (method === 'get_window') {
     output.id = number(args.id, 'id', 1, Number.MAX_SAFE_INTEGER, true);
     if (args.app !== undefined) output.app = string(args.app, 'app', 4096);
@@ -50,8 +51,18 @@ export function validate(method: Method, value: unknown): Record<string, unknown
   if (method === 'press_key') {
     output.key = string(args.key, 'key', 256);
     if (String(output.key).split('+').some(key => /^(meta|windows|win|cmd|command|super|os)(_[lr])?$/i.test(key.trim()))) fail('Windows/system key shortcuts are disabled.');
+    if (args.mode !== undefined) {
+      if (typeof args.mode !== 'string' || !['virtual-key', 'scan-code'].includes(args.mode)) fail('mode must be virtual-key or scan-code.');
+      output.mode = args.mode;
+    }
   }
-  if (method === 'type_text') output.text = string(args.text, 'text');
+  if (method === 'type_text') {
+    output.text = string(args.text, 'text');
+    if (args.method !== undefined) {
+      if (typeof args.method !== 'string' || !['unicode', 'paste'].includes(args.method)) fail('method must be unicode or paste.');
+      output.method = args.method;
+    }
+  }
   if (method === 'scroll') {
     output.x = number(args.x, 'x', 0); output.y = number(args.y, 'y', 0);
     output.scrollX = number(args.scrollX, 'scrollX', -10_000, 10_000);

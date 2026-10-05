@@ -1,4 +1,24 @@
-# 本次验证记录
+# 验证记录
+
+## 0.1.2 · 2026-10-06
+
+目标仍为 **Harness 0.2.0-rc.2 / Cordis 4.0.4 / Schemastery 3.18.4**。`npm test` 构建成功，**116 项通过，0 失败、0 跳过**，其中安装脚本 16 项。新增回归覆盖真实发现结果与中文游戏别名、弱 UIA 焦点、扫描码参数、剪贴板可信配置、输入回执、稳定/未知输入故障暂停、派发后取消与通信失败、真正 Harness 错误码，以及审批和其他合法工具不受影响。
+
+自包含 Windows helper 构建成功，在活动桌面直接运行 `--integration-test`，**21 项检查通过**。本次新报告见 [native-integration-v0.1.2.json](test-artifacts/native-integration-v0.1.2.json)，依赖与测试汇总见 [v0.1.2-verification.json](test-artifacts/v0.1.2-verification.json)。真实验证包括：
+
+- 无标题窗口按 HWND、PID/启动时间、进程路径与窗口类发现；未猜测窗口句柄。
+- 自绘窗口实际收到一次扫描码；无焦点句柄的游戏队列仅在已验证点击后允许扫描码，不允许盲发文字。
+- 中文、Ω、emoji、多行/Tab 的实际文本读回；过滤 Unicode 包的控件产生 `INPUT_NOT_ACCEPTED`。
+- 目标完整性与焦点诊断、密码控件拒绝、默认粘贴拒绝，以及鼠标、滚动、拖动、UIA 操作。
+- WGC 正常/遮挡截图像素与尺寸；观察被覆盖窗口不改变前台，没有 BitBlt 桌面复制降级。新截图：[正常](test-artifacts/fixture-wgc-v0.1.2.png)、[遮挡](test-artifacts/fixture-occluded-wgc-v0.1.2.png)。
+
+**成功粘贴路径本次未实测**：原剪贴板包含位图/私有句柄格式，插件在修改前安全拒绝，报告 `clipboard_paste_verified=false`；未清空用户剪贴板以制造测试条件。系统为 Windows NT 10.0.26200.0、.NET 8.0.11、X64、单显示器、DPI 96。
+
+安装验证在隔离目录中使用 pnpm 11.22.0：实际旧版 GitHub 0.1.1 URL 可安装并写入 SHA-512，正常 frozen/offline 重装成功；只移除该摘要复现用户错误；定点可信修复后 frozen/offline 重装成功。`--fix-lockfile --no-frozen-lockfile` 未解决缺失摘要，未关闭供应链规则。详细过程和真实旧版附件摘要见 [安装指南](installation.md)。没有操作真实 DSH profile，也没有把 pnpm 测试描述为 DSH 桌面安装器端到端测试。
+
+《杀戮尖塔 2》本体当前未运行，**尚未验证实际游戏窗口与游戏操作**；已验证的是针对无标题/弱 UIA 游戏特征的自建窗口。Raw Input、过滤驱动、独占全屏、管理员应用、混合 DPI 多屏与在线视觉模型仍未完成端到端验收。本次新版本尚未上传 GitHub，旧 0.1.1 附件不含这些修复。
+
+## 0.1.1 · 历史记录
 
 验证日期：2026-10-04。测试仅使用协议 fixture、假后端、内存附件存储和插件自建的 Windows 测试窗口；没有操作用户现有应用。
 

@@ -34,10 +34,11 @@ internal static class Capture
         catch (Exception ex)
         {
             if (!allowFallback) throw new RpcError("CAPTURE_UNAVAILABLE", $"Windows.Graphics.Capture failed: {ex.Message}");
-            string printWindowReason;
             try { return PrintWindowCapture(hwnd, ex.Message); }
-            catch (Exception fallback) { printWindowReason = fallback.Message; }
-            return ScreenCapture(hwnd, $"Windows.Graphics.Capture failed: {ex.Message} {printWindowReason}");
+            catch (Exception fallback)
+            {
+                throw new RpcError("CAPTURE_UNAVAILABLE", $"Windows.Graphics.Capture failed: {ex.Message}; PrintWindow also failed: {fallback.Message}. Window observation never activates a target or copies desktop/other-application pixels.");
+            }
         }
     }
 
@@ -125,43 +126,4 @@ internal static class Capture
         return new CapturedImage(output.ToArray(), bitmap.Width, bitmap.Height, rect, "print-window", reason);
     }
 
-    /// <summary>
-    /// Last-resort fallback for hosts where both Windows.Graphics.Capture and
-    /// PrintWindow are refused (virtual display drivers, capture-blocking
-    /// software). The window is raised first, because desktop pixels carry
-    /// whatever is actually on screen; the bitmap always keeps the full window
-    /// frame so screenshot coordinates keep mapping to the window origin, and
-    /// parts outside the virtual desktop stay transparent.
-    /// </summary>
-    private static CapturedImage ScreenCapture(nint hwnd, string reason)
-    {
-        var rect = Win32.Bounds(hwnd, true);
-        if (rect.Width <= 0 || rect.Height <= 0 || (long)rect.Width * rect.Height > 100_000_000)
-            throw new RpcError("CAPTURE_UNAVAILABLE", $"Invalid window dimensions; {reason}");
-        var raised = Win32.GetForegroundWindow() == hwnd;
-        if (!raised)
-        {
-            Win32.ShowWindow(hwnd, 9);
-            raised = Win32.SetForegroundWindow(hwnd) && Win32.GetForegroundWindow() == hwnd;
-            if (raised) Thread.Sleep(200);
-        }
-        var left = Math.Max(rect.Left, Win32.GetSystemMetrics(76));
-        var top = Math.Max(rect.Top, Win32.GetSystemMetrics(77));
-        var right = Math.Min(rect.Right, Win32.GetSystemMetrics(76) + Win32.GetSystemMetrics(78));
-        var bottom = Math.Min(rect.Bottom, Win32.GetSystemMetrics(77) + Win32.GetSystemMetrics(79));
-        if (right <= left || bottom <= top)
-            throw new RpcError("CAPTURE_UNAVAILABLE", $"Window lies outside the virtual desktop; {reason}");
-        using var bitmap = new Bitmap(rect.Width, rect.Height, PixelFormat.Format32bppArgb);
-        using (var graphics = Graphics.FromImage(bitmap))
-        {
-            graphics.Clear(Color.Transparent);
-            graphics.CopyFromScreen(left, top, left - rect.Left, top - rect.Top, new Size(right - left, bottom - top), CopyPixelOperation.SourceCopy);
-        }
-        using var stream = new MemoryStream();
-        bitmap.Save(stream, ImageFormat.Png);
-        var coverage = raised
-            ? "the window is foreground"
-            : "the window is NOT foreground, so occluding windows may cover it";
-        return new CapturedImage(stream.ToArray(), bitmap.Width, bitmap.Height, rect, "screen-bitblt", $"{reason} Screen BitBlt of the desktop region was used instead; {coverage}.");
-    }
 }
