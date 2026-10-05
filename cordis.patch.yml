@@ -1,0 +1,6 @@
+- insert:
+    - id: cpuse
+      name: dsh-plugin-cpuse
+      config:
+        approvalMode: always
+        screenshots: true

@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "checks": [
+    "list_windows/get_window identity",
+    "list_apps",
+    "UIAutomation tree/focus",
+    "set_value + stale element rejection",
+    "click/press_key/type_text Unicode",
+    "UIA TextPattern document/selection + multiline/tab Unicode",
+    "perform_secondary_action Invoke",
+    "WGC PNG dimensions/origin",
+    "coordinate bounds rejection",
+    "WGC captures fully occluded window",
+    "mouse click",
+    "wheel SendInput verified UIA displacement",
+    "drag SendInput"
+  ],
+  "screenshot_artifacts": "docs\\test-artifacts",
+  "capture_backend": "windows-graphics-capture",
+  "os": "Microsoft Windows NT 10.0.26200.0",
+  "runtime": ".NET 8.0.11",
+  "process_architecture": "X64",
+  "monitor_count": 1,
+  "fixture_dpi": 96,
+  "per_monitor_v2": true,
+  "unverified": [
+    "Mixed-DPI multi-monitor behavior",
+    "Accessibility on other applications and providers",
+    "Elevated apps and locked desktop"
+  ]
+}

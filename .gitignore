@@ -1,0 +1,16 @@
+# Dependencies and generated build output
+/node_modules/
+/lib/
+/native/.packages/
+/native/**/bin/
+/native/**/obj/
+
+# Research downloads, caches and release archives
+/research/
+/.npm-cache/
+/*.tgz
+/*.zip
+
+# Test coverage and local logs
+/coverage/
+*.log
