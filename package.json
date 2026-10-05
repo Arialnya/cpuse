@@ -33,6 +33,7 @@
     "cordis.patch.yml",
     "docs",
     "examples",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],

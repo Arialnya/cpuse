@@ -10,6 +10,8 @@
 
 这是使用公开 Windows API 编写的实现，不依赖 Codex 安装、`@oai/sky` 或其私有 helper。适用 Windows 10 19041+ / Windows 11；浏览器可作为普通窗口控制。Codex 的私有实现、DOM 浏览器接口和 macOS 后端不在本包内。
 
+当前源码版本 **0.1.2**，更新内容见 [CHANGELOG](CHANGELOG.md)。安装问题见 [安装指南](docs/installation.md)，游戏窗口定位见 [游戏窗口指南](docs/game-windows.md)。预构建包以 [GitHub Releases](https://github.com/Arialnya/cpuse/releases) 中实际发布的资产为准。
+
 ## 安装与运行
 
 源码构建需要 Node.js 22.19+ 或 24+，以及 .NET 8/9 SDK。Harness 插件安装命令还需要 `pnpm` 在 PATH 中。默认发布自包含 Windows x64 helper，运行生成的插件无需单独安装 .NET。首次构建会下载 npm/NuGet 依赖。
