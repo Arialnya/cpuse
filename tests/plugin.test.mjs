@@ -204,6 +204,61 @@ test('actual ApprovalService never policy rejects even a later allow answerer', 
   assert.equal(audit[1].data.outcome, 'rejected');
 });
 
+test('trustedApps skips the host approval ask for observation and input under the never policy', async t => {
+  let answers = 0;
+  const { execute, calls, agent } = await setup(t, {
+    policy: 'never',
+    config: { trustedApps: ['c:/fixture/EDITOR.exe'] },
+    answer: async () => { answers++; return 'allowed-once'; },
+  });
+  canonical(await execute('list_windows'));
+  const state = canonical(await execute('get_window_state', { window }));
+  const action = canonical(await execute('click', { window, observation_id: state.observation_id, element_index: 0 }));
+  assert.equal(action.success, true);
+  assert.equal(answers, 0);
+  assert.deepEqual(agent.session.snapshotEvents().filter(event => event.type.startsWith('approval/')), []);
+  assert.deepEqual(calls.map(call => call.method), ['list_windows', 'get_window_state', 'click', 'get_window_state']);
+});
+
+test('trustedApps leaves every unlisted application behind the approval ask', async t => {
+  const requests = [];
+  const { execute, calls } = await setup(t, {
+    config: { trustedApps: ['C:\\Fixture\\other.exe'] },
+    answer: async request => { requests.push(request.toolName); return 'allowed-once'; },
+  });
+  await observe(execute);
+  assert.deepEqual(requests, ['computer_use_get_window_state']);
+  assert.deepEqual(calls.map(call => call.method), ['list_windows', 'get_window_state']);
+});
+
+test('trustedApps cannot re-enable an application denied by policy or built-in exclusion', async t => {
+  const { execute, calls } = await setup(t, {
+    policy: 'never',
+    config: { trustedApps: [window.app], deniedApps: [window.app] },
+  });
+  canonical(await execute('list_windows'));
+  const denied = await execute('get_window_state', { window });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /excluded by the Computer Use policy/);
+  assert.deepEqual(calls.map(call => call.method), ['list_windows']);
+});
+
+test('a sandboxed helper reports INPUT_BLOCKED instead of a silent success', async t => {
+  const { execute, calls } = await setup(t, {
+    config: { trustedApps: [window.app] },
+    hook: (method) => {
+      if (method === 'click') throw new ComputerUseError('INPUT_BLOCKED', 'Cannot inject desktop input for click: the native helper runs with a low integrity token.');
+      return undefined;
+    },
+  });
+  canonical(await execute('list_windows'));
+  const state = canonical(await execute('get_window_state', { window }));
+  const clicked = await execute('click', { window, observation_id: state.observation_id, element_index: 0 });
+  assert.equal(clicked.isError, true);
+  assert.match(clicked.content[0].text, /INPUT_BLOCKED|low integrity token/);
+  assert.deepEqual(calls.map(call => call.method), ['list_windows', 'get_window_state', 'click']);
+});
+
 test('approved image observation becomes a verified attachment reference while screenshot coordinates remain canonical', async t => {
   const { ctx, execute, calls } = await setup(t, { image: true, answer: async () => 'allowed-once' });
   canonical(await execute('list_windows'));

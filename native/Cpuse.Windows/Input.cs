@@ -84,7 +84,8 @@ internal sealed partial class Backend
         if (count < 1 || count > 3) throw new RpcError("INVALID_ARGUMENT", "click_count must be 1, 2, or 3.");
         var button = p.TryGetProperty("mouse_button", out var buttonValue) ? buttonValue.GetString() : "left";
         var flags = button?.ToLowerInvariant() switch { "left" or "l" => (2u, 4u), "right" or "r" => (8u, 16u), "middle" or "m" => (32u, 64u), _ => throw new RpcError("INVALID_ARGUMENT", "mouse_button must be left, right, or middle.") };
-        Activate(b); HitTest(b, point); Move(point);
+        Injection.Require("click");
+        Activate(b); HitTest(b, point); Move(point); Injection.VerifyPointer(point);
         for (var i = 0; i < count; i++) { HitTest(b, point); Win32.Send(Win32.Mouse(flags.Item1), Win32.Mouse(flags.Item2)); if (i + 1 < count) Thread.Sleep(55); }
     }
     private void Scroll(WindowBinding b, JsonElement p)
@@ -92,13 +93,15 @@ internal sealed partial class Backend
         var point = Coordinate(b, p, "x", "y");
         var dx = Number(p, "scrollX"); var dy = Number(p, "scrollY");
         if (Math.Abs(dx) > 100_000 || Math.Abs(dy) > 100_000) throw new RpcError("INVALID_ARGUMENT", "Scroll deltas exceed 100000 wheel units.");
-        Activate(b); HitTest(b, point); Move(point);
+        Injection.Require("scroll");
+        Activate(b); HitTest(b, point); Move(point); Injection.VerifyPointer(point);
         if (dy != 0) Win32.Send(Win32.Mouse(0x0800, unchecked((uint)-(int)Math.Round(dy))));
         if (dx != 0) Win32.Send(Win32.Mouse(0x1000, unchecked((uint)(int)Math.Round(dx))));
     }
     private void Drag(WindowBinding b, JsonElement p)
     {
         var from = Coordinate(b, p, "from_x", "from_y"); var to = Coordinate(b, p, "to_x", "to_y");
+        Injection.Require("drag");
         Activate(b); HitTest(b, from); HitTest(b, to);
         var inputs = new List<Win32.INPUT> { MoveInput(from), Win32.Mouse(2) };
         for (var i = 1; i <= 24; i++) inputs.Add(MoveInput(new Win32.POINT(from.X + (to.X - from.X) * i / 24, from.Y + (to.Y - from.Y) * i / 24)));
@@ -107,6 +110,7 @@ internal sealed partial class Backend
         // Paired down/up are submitted atomically to the OS queue: cancellation
         // cannot terminate the backend between separate SendInput calls.
         Win32.Send(inputs.ToArray());
+        Injection.VerifyPointer(to);
     }
     private static void EnsureModifiersReleased()
     {
@@ -116,6 +120,7 @@ internal sealed partial class Backend
     {
         var text = String(p, "text");
         if (text.Length > 1_000_000) throw new RpcError("INVALID_ARGUMENT", "Text exceeds one million UTF-16 code units.");
+        Injection.Require("type_text");
         Activate(b); EnsureModifiersReleased();
         var focused = AutomationElement.FocusedElement;
         if (focused == null || !BelongsTo(focused, b.Handle)) throw new RpcError("FOCUS_FAILED", "Keyboard focus is not inside the selected window.");
@@ -146,6 +151,7 @@ internal sealed partial class Backend
     {
         var chord = String(p, "key").Split('+', StringSplitOptions.TrimEntries);
         if (chord.Length == 0 || chord.Length > 8 || chord.Any(string.IsNullOrWhiteSpace)) throw new RpcError("INVALID_KEY", "Use keysym names separated by +; name the + character as plus.");
+        Injection.Require("press_key");
         var keys = new List<(ushort Vk, bool Extended)>();
         foreach (var key in chord)
         {

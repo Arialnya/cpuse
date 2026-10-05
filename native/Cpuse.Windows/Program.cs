@@ -23,7 +23,8 @@ internal static class Program
         }
         if (args.Contains("--self-test"))
         {
-            Console.WriteLine(JsonSerializer.Serialize(new { ok = true, capabilities = backend.Dispatch("capabilities", default), inputStructBytes = System.Runtime.InteropServices.Marshal.SizeOf<Win32.INPUT>() }));
+            var integrity = Win32.IntegrityDiagnostic();
+            Console.WriteLine(JsonSerializer.Serialize(new { ok = true, capabilities = backend.Dispatch("capabilities", default), integrity_detail = integrity.Detail, inputStructBytes = System.Runtime.InteropServices.Marshal.SizeOf<Win32.INPUT>() }));
             return;
         }
         string? line;

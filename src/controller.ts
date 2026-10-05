@@ -9,7 +9,9 @@ export interface ExecutionContext { owner: string; signal?: AbortSignal }
 const blocked = ['cmd.exe', 'powershell.exe', 'pwsh.exe', 'windowsterminal.exe', 'wt.exe', 'bash.exe', 'wsl.exe', 'conhost.exe',
   'lockapp.exe', 'credentialuibroker.exe', 'consent.exe', 'sechealthui.exe', 'keepass.exe',
   'keepassxc.exe', '1password.exe', 'bitwarden.exe'];
-const normalize = (app: string) => app.replaceAll('/', '\\').toLowerCase();
+/** App identifiers compare case-insensitively and ignore path separator differences. */
+export const normalizeAppId = (app: string) => app.replaceAll('/', '\\').toLowerCase();
+const normalize = normalizeAppId;
 const leaf = (app: string) => basename(app.replaceAll('\\', '/')).toLowerCase();
 
 // A Windows desktop is shared even by different Cordis plugin instances.

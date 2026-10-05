@@ -73,10 +73,12 @@ powershell -NoProfile -File scripts/build-native.ps1 -Runtime win-arm64
         observationTtlMs: 30000
         allowedApps: []
         deniedApps: []
+        trustedApps: []
 ```
 
 - `approvalMode: always`：读取某应用之前审批；每次输入、启动和切换前台再走宿主审批。`app` 则在插件生命周期内按 agent/应用记住审批。实际批准/拒绝仍由 Harness 的审批服务决定，缺少该服务时需要审批的操作不会执行。
 - `allowedApps` / `deniedApps`：使用枚举返回的精确应用标识，忽略大小写和路径分隔符差异。空允许列表不限制普通应用。终端、锁屏和部分敏感应用为内置排除项。
+- `trustedApps`：列出的应用**完全跳过宿主审批提问**，在 `approvalMode: always`、甚至 Harness 的 `never` 审批策略下也可直接观察和输入。这是按应用显式放弃审批门槛的逃生舱：`deniedApps`、内置排除项和窗口身份校验仍然生效，但模型可以在无人确认的情况下读取该应用窗口内容并驱动其界面。只填写你需要无人值守操作的应用（例如固定的聊天工具），不要填写终端、浏览器、密码管理器或任何涉及支付、删除、上传的应用。
 - `screenshots: false`：供没有图像输入的模型使用 UIA 文字。没有图像能力的模型不会因为安装本插件而获得视觉理解；画布等弱 UIA 应用需要视觉模型。
 - `allowPrintWindowFallback: true`：WGC 失败时允许 PrintWindow 降级，结果明确报告实际后端与原因。某些 GPU 内容可能不完整；默认关闭。
 - `helperPath`：可信配置可指定已构建 helper 的绝对路径；模型工具不能更改它。
@@ -84,6 +86,32 @@ powershell -NoProfile -File scripts/build-native.ps1 -Runtime win-arm64
 Windows 输入运行在已解锁的活动桌面，会移动指针和改变前台焦点。管理员应用受 Windows UIPI 限制；受保护内容、最小化窗口和应用自身的无障碍实现可能限制截图或控件操作。桌面操作过程中的人为干预和应用异步变化无法完全消除，需检查每次返回状态。
 
 宿主已挂载 `computerUse` 登记服务时，插件占用其唯一提供者槽，原生进程及截图投影停止后才释放。没有该服务的自定义组合中，本插件的串行队列只约束自身实例，请保持只启用一个桌面控制提供者。
+
+## 输入被系统拒绝时
+
+helper 以自己的令牌向桌面注入输入。若它被沙箱、低完整性令牌或以其他受限身份启动，Windows 会**静默丢弃**每一次 `SendInput`（UIPI），原生层仍会报告成功。本插件因此先探测再执行：
+
+- `computer_use_capabilities` 报告 `process_integrity`（`untrusted`/`low`/`medium`/`high`/…）与 `input_injection`（`allowed`/`blocked`）。探测本身是一次"移到当前位置"的空操作 `SetCursorPos`，不改变桌面。
+- `input_injection: blocked` 时，`click`、`press_key`、`type_text`、`scroll`、`drag` 直接返回 `INPUT_BLOCKED`，不会假装动作发生过。观察类方法与 UIA 方法（`list_apps`、`list_windows`、`get_window`、`get_window_state`、`set_value`、`perform_secondary_action`）不受影响。
+- 坐标输入移动指针后会核对 `GetCursorPos`，被丢弃的移动返回 `INPUT_DROPPED`，且不会自动重试。
+
+遇到 `INPUT_BLOCKED` 时，先查 helper 自己所在路径的**强制完整性标签**：DSH 的 Windows 文件系统沙箱会给授权根留下常驻 Low 标签（"常驻 Low 标签的生命期长于 DSH"），在该目录树里构建出来的 exe 会带着 Low 标签，Windows 于是在**任何**位置都以 Low 完整性启动它，UIPI 照旧丢弃全部注入。两种修法：
+
+```powershell
+# 1) 提权后清掉残留标签（把标签升到 Medium 需要 SeRelabelPrivilege，普通会话只会得到"拒绝访问"）
+icacls "E:\my_files\dshh\cpuse" /setintegritylevel (OI)(CI)Medium /T /C
+```
+
+```yaml
+# 2) 或者不动标签：把 helper 构建/发布到没有标签的目录，再用可信配置指过去
+- id: cpuse
+  config:
+    helperPath: 'C:\Users\99607\AppData\Local\dsh-cpuse-native\cpuse-windows.exe'
+```
+
+`computer_use_capabilities` 的 `process_integrity` 会显示 helper 实际拿到的级别（`low`/`medium`…）。同一个 Low 令牌还会让 `Windows.Graphics.Capture` 与 `PrintWindow` 对本机**所有**窗口返回"拒绝访问"——此时截图只能靠上面的屏幕 BitBlt 兜底；helper 恢复中等完整性后 WGC 立即恢复正常。
+
+无法提权时的等价修法：标签只挂在目录与已存在的文件对象上，而**构建产物可以删掉重生成**——在被标 Low 的目录里删掉 `lib`（或 `lib/native`、`bin`、`obj`）再 `npm run build` / `npm run build:native`，新文件会从已经修好的上级目录继承 Medium。注意目录本身若是 Low，新建的子项仍会继承 Low，所以要从已被标 Low 的**最外层**那个目录开始逐层重建。
 
 审批是执行门槛，不能自动识别每个按钮的业务含义。插件提示要求模型遵循用户范围并在发送、删除、付款或分享等动作前取得用户批准；界面内容不能被当作授权。建议在需要独立工作的场景使用专用 Windows 会话或虚拟机。
 

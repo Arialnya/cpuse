@@ -40,6 +40,7 @@ internal static class Win32
     [DllImport("user32.dll")] internal static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", SetLastError = true)] internal static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll")] internal static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] internal static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] internal static extern short VkKeyScan(char ch);
     [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] internal static extern bool PrintWindow(nint hwnd, nint hdc, uint flags);
@@ -50,6 +51,52 @@ internal static class Win32
     [DllImport("kernel32.dll")] internal static extern bool GetProcessTimes(nint process, out FILETIME creation, out FILETIME exit, out FILETIME kernel, out FILETIME user);
     [DllImport("kernel32.dll")] internal static extern bool CloseHandle(nint handle);
     [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")] internal static extern nint GetCurrentProcess();
+    [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool OpenProcessToken(nint process, uint access, out nint token);
+    [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool GetTokenInformation(nint token, int infoClass, nint info, int length, out int returned);
+    [DllImport("advapi32.dll")] internal static extern nint GetSidSubAuthority(nint sid, uint index);
+    [DllImport("advapi32.dll")] internal static extern nint GetSidSubAuthorityCount(nint sid);
+
+    /// <summary>Mandatory integrity label of this process, read from its own token.</summary>
+    internal static string IntegrityName() => IntegrityDiagnostic().Name;
+
+    /// <summary>Step-by-step token read, so an unexpected sandbox token reports why instead of guessing.</summary>
+    internal static (string Name, string Detail) IntegrityDiagnostic()
+    {
+        if (!OpenProcessToken(GetCurrentProcess(), 0x0008, out var token))
+            return ("unknown", $"OpenProcessToken failed with {Marshal.GetLastWin32Error()}");
+        try
+        {
+            var probed = GetTokenInformation(token, 25, 0, 0, out var length);
+            if (length <= 0)
+                return ("unknown", probed ? "GetTokenInformation(TokenIntegrityLevel) reported an empty size" : $"GetTokenInformation size probe failed with {Marshal.GetLastWin32Error()}");
+            var buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                if (!GetTokenInformation(token, 25, buffer, length, out _))
+                    return ("unknown", $"GetTokenInformation(TokenIntegrityLevel) failed with {Marshal.GetLastWin32Error()}");
+                var sid = Marshal.ReadIntPtr(buffer);
+                var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                if (count == 0) return ("unknown", "integrity SID has no sub-authority");
+                var rid = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+                return (switchName(rid), $"integrity RID 0x{rid:X}");
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        finally { CloseHandle(token); }
+    }
+
+    private static string switchName(int rid) => rid switch
+    {
+        0x0000 => "untrusted",
+        0x1000 => "low",
+        0x2000 => "medium",
+        0x2100 => "medium-plus",
+        0x3000 => "high",
+        0x4000 => "system",
+        0x5000 => "protected",
+        _ => $"rid-{rid}",
+    };
 
     internal static string Title(nint hwnd) { var text = new StringBuilder(Math.Max(256, GetWindowTextLength(hwnd) + 1)); GetWindowText(hwnd, text, text.Capacity); return text.ToString(); }
     internal static bool DpiAware => AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new nint(-4));

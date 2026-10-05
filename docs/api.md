@@ -76,10 +76,14 @@ try {
 
 各方法在最后一个参数接受 `AbortSignal`。输入方法返回 `void`，其自动刷新结果由 `sky.lastState` 读取。`activate_window` 也更新该状态。客户端调用不经过 Harness 的审批钩子，调用者负责在用户授权范围内使用它。
 
-`createComputerUse` 的选项包括 `screenshots`、`allowPrintWindowFallback`、`allowedApps`、`deniedApps`、`observationTtlMs`、`timeoutMs` 和可信本地 `helperPath`。PrintWindow 降级默认关闭，启用后截图会标注实际后端和降级原因。应用列表使用大小写和路径分隔符规范化后的精确标识匹配，拒绝列表优先；内置排除项不能通过允许列表重新启用。
+`createComputerUse` 的选项包括 `screenshots`、`allowPrintWindowFallback`、`allowedApps`、`deniedApps`、`trustedApps`、`observationTtlMs`、`timeoutMs` 和可信本地 `helperPath`。PrintWindow 降级默认关闭，启用后截图会标注实际后端和降级原因。应用列表使用大小写和路径分隔符规范化后的精确标识匹配，拒绝列表优先；内置排除项不能通过允许列表重新启用。
+
+`trustedApps` 只影响插件注册工具时的审批钩子：列出的应用不发起宿主审批提问，输入和观察都直接放行，即使 Harness 的审批策略为 `never`。它不改变 `allowedApps`／`deniedApps` 的执行期校验，因此被拒绝的应用无法借助它执行。按应用放弃审批意味着模型可以无人确认地读取该应用窗口内容并操作其界面，请只列出确实需要无人值守的应用。
 
 ## 失败与恢复
 
 参数错误在发送输入之前返回 `INVALID_ARGUMENT`。未枚举窗口返回 `UNKNOWN_WINDOW`，旧/异会话观察返回 `STALE_OBSERVATION`，异截图返回 `STALE_SCREENSHOT`，应用策略拒绝返回 `APP_DENIED`。
+
+`capabilities` 报告 `process_integrity` 与 `input_injection`：`blocked` 表示 helper 的令牌不允许写交互桌面，`click`／`press_key`／`type_text`／`scroll`／`drag` 会以 `INPUT_BLOCKED` 失败，而不是在事件被 UIPI 丢弃后仍报告成功。坐标输入在移动指针后核对 `GetCursorPos`，被丢弃的移动返回 `INPUT_DROPPED` 且不重试。
 
 动作后刷新失败返回 `REFRESH_FAILED`，它意味着输入可能已经完成。`ABORTED`、`TIMEOUT` 或 helper 退出后，重新枚举并观察；不要立即重复输入。原生层还会返回窗口关闭、身份改变、元素失效、前台失败和截图失败等原因。

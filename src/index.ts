@@ -6,7 +6,7 @@ import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';
 import '@deepseek-ai/dsh-system-prompt';
 import type {} from '@deepseek-ai/dsh-computer-use';
 import { NativeBackend } from './backend.js';
-import { Controller } from './controller.js';
+import { Controller, normalizeAppId } from './controller.js';
 import { methods, actions, type Method, type Screenshot, type WindowState } from './types.js';
 import { descriptions, schemas } from './schemas.js';
 import { guidance } from './guidance.js';
@@ -15,7 +15,7 @@ export const name = 'cpuse';
 export const inject = ['tools', 'systemPrompt'];
 export interface Config {
   helperPath?: string; timeoutMs: number; observationTtlMs: number; screenshots: boolean; allowPrintWindowFallback: boolean;
-  allowedApps: string[]; deniedApps: string[]; approvalMode: 'always' | 'app';
+  allowedApps: string[]; deniedApps: string[]; trustedApps: string[]; approvalMode: 'always' | 'app';
 }
 export const Config: z<Config> = z.object({
   helperPath: z.string().description('Optional absolute path to the independently built native helper.'),
@@ -25,6 +25,7 @@ export const Config: z<Config> = z.object({
   allowPrintWindowFallback: z.boolean().default(false).description('Opt into explicitly labelled PrintWindow capture when WGC fails.'),
   allowedApps: z.array(z.string()).default([]).description('Exact returned app identifiers; empty permits apps subject to approval.'),
   deniedApps: z.array(z.string()).default([]),
+  trustedApps: z.array(z.string()).default([]).description('Exact returned app identifiers that skip the host approval ask entirely. Trusted apps still pass every deniedApps, built-in exclusion and window-identity check; only list apps this agent may drive unattended.'),
   approvalMode: z.union(['always', 'app']).default('always').description('always asks on every input; app asks once per application per agent in this plugin lifetime.'),
 });
 
@@ -49,6 +50,7 @@ function modelResult(value: unknown) {
 export async function apply(ctx: Context, config: Config) {
   const controller = new Controller(new NativeBackend({ helperPath: config.helperPath, timeoutMs: config.timeoutMs }), config);
   const toolNames = new Map(methods.map(method => [`computer_use_${method}`, method]));
+  const trustedApps = new Set(config.trustedApps.map(normalizeAppId));
   const approvedApps = new Set<string>();
   const lifetime = new AbortController();
   const pending = new Set<Promise<ToolExecutionResult>>();
@@ -82,6 +84,10 @@ export async function apply(ctx: Context, config: Config) {
     const method = toolNames.get(exec.name);
     if (!method || ['list_apps', 'list_windows', 'capabilities'].includes(method)) return prior;
     const app = appFrom(method, exec.arguments);
+    // trustedApps is an explicit, per-app opt-out of the host approval ask. It is
+    // evaluated before the one-shot approvedApps memory, so a trusted app never
+    // needs a first approved call to become usable under a rejecting policy.
+    if (app && trustedApps.has(normalizeAppId(app))) return prior;
     const key = `${owner(exec)}:${app?.toLowerCase()}`;
     if (app && approvedApps.has(key) && !(config.approvalMode === 'always' && (actions.has(method) || ['launch_app', 'activate_window'].includes(method)))) return prior;
     return { kind: 'ask', reason: `Computer Use ${method} in ${app ?? 'the selected application'}. This may expose window content or change the active desktop.` };
