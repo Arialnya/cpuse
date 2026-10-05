@@ -40,18 +40,28 @@ powershell -NoProfile -File scripts/build-native.ps1 -Runtime win-arm64
 
 ### 从 GitHub 仓库安装（推荐：预构建 tarball，免构建）
 
-Release 附件里的 `.tgz` 已经包含编译好的 JS 与自包含 .NET helper，pnpm 对 HTTP/本地 tarball **不执行任何构建脚本**，因此目标机器不需要 `allowBuilds`、也不需要 .NET SDK，Windows 10 19041+/11 x64 均可直接安装。
+Release 附件里的 `.tgz` 已经包含编译好的 JS 与自包含 .NET helper，pnpm 对 tarball **不执行任何构建脚本**，因此目标机器不需要 `allowBuilds`、也不需要 .NET SDK，Windows 10 19041+/11 x64 均可直接安装。
 
-在 DSH「插件 → 安装」的输入框里粘贴 Release 附件地址（安装 spec 会被识别为 tarball）：
+**步骤一：下载附件**（浏览器直接打开即可）：
 
 ```text
 https://github.com/Arialnya/cpuse/releases/download/v0.1.1/dsh-plugin-cpuse-0.1.1.tgz
 ```
 
-也可以直接指向本地文件（必须是绝对路径，且以 `.tgz` 结尾）：
+**步骤二：在 DSH「插件 → 安装」的输入框里粘贴下载文件的绝对路径**（必须以 `/` 或盘符开头、以 `.tgz` 结尾）：
 
 ```text
 E:\downloads\dsh-plugin-cpuse-0.1.1.tgz
+```
+
+> 为什么推荐本地路径而不是 tarball 的 HTTP 地址？pnpm 只有在真正下载过附件之后，才会把 `integrity` 写进 lockfile；一旦这次下载没成功（网络或代理不通、或复用了上次失败的解析结果），紧接着的 frozen 校验就会报 `[ERR_PNPM_MISSING_TARBALL_INTEGRITY]`，把真正的网络失败掩盖掉。`file:` 来源（本地绝对路径）在 pnpm 里显式豁免该校验，断网也能装；要一句 spec 直装，请用 npm registry（见下）。
+
+### 从 npm registry 安装（发布后可用）
+
+一旦包被 `npm publish` 到 registry，安装框里只写包名即可，registry 元数据自带 `integrity`，同样不需要构建：
+
+```text
+dsh-plugin-cpuse
 ```
 
 ### 从 git 源安装（需要本机有 .NET 8/9 SDK）
@@ -65,9 +75,18 @@ allowBuilds:
 
 放行 key 是 `包名@codeload tarball URL`：pnpm 对 git 源只认这个精确 key（包名与通配符都不生效），而 URL 里带 commit，所以**每次推送新提交都要更新 key**——报错信息会打印当前该填的那一行。本机构建还需要 .NET 8/9 SDK，首次会下载 NuGet 依赖（约 360 MB）。
 
+安装 spec 写 `github:Arialnya/cpuse` 或仓库 URL。这种方式拉到的是纯源码树、没有 `lib/`，pnpm 11 因此要执行包里的 `prepack` 构建，并会先用 `[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED]` 拦下；在该 profile 的 `pnpm-workspace.yaml` 里按报错提示放行即可：
+
+```yaml
+allowBuilds:
+  'dsh-plugin-cpuse@https://codeload.github.com/Arialnya/cpuse/tar.gz/<commit sha>': true
+```
+
+放行 key 是 `包名@codeload tarball URL`：pnpm 对 git 源只认这个精确 key（包名与通配符都不生效），而 URL 里带 commit，所以**每次推送新提交都要更新 key**——报错信息会打印当前该填的那一行。本机构建还需要 .NET 8/9 SDK，首次会下载 NuGet 依赖（约 360 MB）。
+
 ## GitHub 源码仓库
 
-仓库保留源码、测试、文档和依赖锁文件。`node_modules/`、`lib/`、原生构建目录与 NuGet 缓存均由 `.gitignore` 排除；克隆后运行 `npm ci` 和 `npm run build:all` 即可重新生成。`npm pack` 会先完整构建，再将运行所需的 helper 和 .NET 运行时打入安装包；把生成的 `.tgz` 传到 GitHub Release 作为附件，别人就能用上面的 tarball 方式免构建安装（源码里没有 `lib/`，这正是 git 安装会被 pnpm 拦下构建脚本的原因）。
+仓库保留源码、测试、文档和依赖锁文件。`node_modules/`、`lib/`、原生构建目录与 NuGet 缓存均由 `.gitignore` 排除；克隆后运行 `npm ci` 和 `npm run build:all` 即可重新生成。`npm pack` 会先完整构建，再将运行所需的 helper 和 .NET 运行时打入安装包；把生成的 `.tgz` 传到 GitHub Release 作为附件，别人就能下载后按上面的本地路径方式免构建安装（源码里没有 `lib/`，这正是 git 安装会被 pnpm 拦下构建脚本的原因）。
 
 ## 实现能力
 
