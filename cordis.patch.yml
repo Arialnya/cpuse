@@ -2,5 +2,5 @@
     - id: cpuse
       name: dsh-plugin-cpuse
       config:
-        approvalMode: always
+        approvalMode: risk
         screenshots: true

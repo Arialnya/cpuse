@@ -1,5 +1,7 @@
 import type { ParameterSchemaSpec } from '@deepseek-ai/dsh-tools';
 import type { Method } from './types.js';
+import { actions } from './types.js';
+import { riskCategories } from './risk.js';
 const window = { type: 'object', additionalProperties: false, required: true,
   properties: { id: { type: 'integer', required: true }, app: { type: 'string', required: true }, title: { type: 'string' } },
 } as const;
@@ -42,3 +44,11 @@ export const descriptions: Record<Method, string> = {
   activate_window: 'Bring a discovered window to the foreground, invalidate prior observation and return fresh state.',
   capabilities: 'Report actual backend, supported operations, screenshot support and platform limitations.',
 };
+
+export function approvalSchema(method: Method, riskMode: boolean): ParameterSchemaSpec {
+  if (!actions.has(method) && method !== 'launch_app') return schemas[method];
+  return { ...schemas[method],
+    intent: { type: 'string', ...(riskMode && actions.has(method) ? { required: true as const } : {}), description: 'Describe this one action and its actual effect, e.g. open Steam library or confirm purchase. Required for input in risk approval mode. Never include secrets.' },
+    risk: { type: 'string', enum: [...riskCategories], description: 'Actual effect: auto/routine, purchase, delete, send, upload, share, security, sensitive_data. Declaring routine cannot override observed risk hints. High-risk effects require approval for each call.' },
+  };
+}

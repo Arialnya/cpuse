@@ -6,19 +6,22 @@ import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';
 import '@deepseek-ai/dsh-system-prompt';
 import type {} from '@deepseek-ai/dsh-computer-use';
+import type {} from '@deepseek-ai/dsh-user-approval';
 import { NativeBackend } from './backend.js';
 import { Controller, normalizeAppId } from './controller.js';
 import { methods, actions, ComputerUseError, type Method, type Screenshot, type WindowState } from './types.js';
 import { failureDiagnostic } from './recovery.js';
 import type { WindowAlias } from './discovery.js';
-import { descriptions, schemas } from './schemas.js';
+import { descriptions, approvalSchema } from './schemas.js';
 import { guidance } from './guidance.js';
+import { validate } from './validation.js';
+import { assessRisk, type RiskCategory } from './risk.js';
 
 export const name = 'cpuse';
 export const inject = ['tools', 'systemPrompt'];
 export interface Config {
   helperPath?: string; timeoutMs: number; observationTtlMs: number; screenshots: boolean; allowPrintWindowFallback: boolean;
-  allowedApps: string[]; deniedApps: string[]; trustedApps: string[]; approvalMode: 'always' | 'app';
+  allowedApps: string[]; deniedApps: string[]; trustedApps: string[]; approvalMode: 'risk' | 'always' | 'app';
   allowClipboardPaste: boolean; windowAliases: WindowAlias[];
 }
 export const Config: z<Config> = z.object({
@@ -31,8 +34,8 @@ export const Config: z<Config> = z.object({
   windowAliases: z.array(z.object({ name: z.string(), terms: z.array(z.string()) })).default([]).description('Search aliases for actual window titles/processes; they do not grant permission or create window identities.'),
   allowedApps: z.array(z.string()).default([]).description('Exact returned app identifiers; empty permits apps subject to approval.'),
   deniedApps: z.array(z.string()).default([]),
-  trustedApps: z.array(z.string()).default([]).description('Exact returned app identifiers that skip the host approval ask entirely. Trusted apps still pass every deniedApps, built-in exclusion and window-identity check; only list apps this agent may drive unattended.'),
-  approvalMode: z.union(['always', 'app']).default('always').description('always asks on every input; app asks once per application per agent in this plugin lifetime.'),
+  trustedApps: z.array(z.string()).default([]).description('Exact app identifiers that skip approval in legacy always/app modes. In risk mode high-risk approval is never skipped. Denied apps, built-in exclusions and window identity still apply.'),
+  approvalMode: z.union(['risk', 'always', 'app']).default('risk').description('risk permits routine operations and asks for each high-risk action. always asks on every input; app asks once per application per agent in this plugin lifetime.'),
 });
 
 function modelResult(value: unknown) {
@@ -89,6 +92,9 @@ export async function apply(ctx: Context, config: Config) {
     if (prior.kind !== 'allow') return prior;
     const method = toolNames.get(exec.name);
     if (!method || ['list_apps', 'list_windows', 'find_window', 'capabilities'].includes(method)) return prior;
+    // Risk approval is inside the tool body, so a later allow hook or trustedApps
+    // cannot bypass a high-risk one-shot decision. Upstream denial is retained.
+    if (config.approvalMode === 'risk') return prior;
     const app = appFrom(method, exec.arguments);
     // trustedApps is an explicit, per-app opt-out of the host approval ask. It is
     // evaluated before the one-shot approvedApps memory, so a trusted app never
@@ -101,10 +107,26 @@ export async function apply(ctx: Context, config: Config) {
   for (const method of methods) {
     const tool = createMcpToolDefinition(ctx, {
       name: `computer_use_${method}`, rawName: method, description: descriptions[method],
-      inputSchema: { ...parameterSchemaSpecToJsonSchema(schemas[method]) },
+      inputSchema: { ...parameterSchemaSpecToJsonSchema(approvalSchema(method, config.approvalMode === 'risk')) },
       async call(args, exec) {
         let result: unknown;
-        try { result = await controller.execute(method, args, { owner: owner(exec), signal: exec.signal }); }
+        try {
+          const parameters = validate(method, args);
+          if (config.approvalMode === 'risk') {
+            const metadata = args as { intent?: string; risk?: RiskCategory };
+            const risk = assessRisk(method, parameters, metadata, controller.approvalObservation(parameters, owner(exec)));
+            if (risk.approval) {
+              const approval = ctx.get('approval');
+              if (!approval || !exec.agent) throw new ComputerUseError('RISK_APPROVAL_UNAVAILABLE', 'This high-risk action requires the Harness approval service; no input was dispatched.');
+              const outcome = await approval.request({ agent: exec.agent, toolName: exec.name, callId: exec.callId,
+                reason: `High-risk computer action: ${risk.category} (${risk.source}); ${method} in ${appFrom(method, parameters) ?? 'the selected application'}. Intent: ${metadata.intent ?? 'not supplied'}. This decision authorizes only this action.`,
+                signal: exec.signal });
+              if (exec.signal.aborted || outcome === 'cancelled') throw new ComputerUseError('ABORTED', 'Risk approval was cancelled; no input was dispatched.');
+              if (outcome !== 'allowed-once') throw new ComputerUseError('RISK_APPROVAL_REJECTED', 'The high-risk action was not approved; no input was dispatched. Do not retry using another tool or identity.');
+            }
+          }
+          result = await controller.execute(method, parameters, { owner: owner(exec), signal: exec.signal });
+        }
         catch (error) {
           if (error instanceof ComputerUseError) throw new HarnessError(JSON.stringify(failureDiagnostic(error, method, args)), error.code);
           throw error;

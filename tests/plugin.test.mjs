@@ -99,7 +99,7 @@ async function setup(t, options = {}) {
     await ctx.plugin(MemoryAttachments);
   }
   if (options.answer) ctx.on('approval/request', options.answer);
-  const fiber = await ctx.plugin(plugin, { screenshots: true, ...options.config });
+  const fiber = await ctx.plugin(plugin, { screenshots: true, approvalMode: 'always', ...options.config });
   const agent = makeAgent();
   let callSerial = 0;
   const execute = (method, args = {}, execution = {}) => ctx.tools.execute({
@@ -517,4 +517,84 @@ test('game window searches remain read-only under never approval and do not auth
   assert.equal(observed.isError, true);
   assert.equal(asks, 0);
   assert.deepEqual(calls.map(call => call.method), ['list_windows']);
+});
+
+test('risk is the new default and routine Steam work proceeds without approval requests', async t => {
+  const steam = { id: 200, app: 'C:\\Program Files (x86)\\Steam\\steam.exe', title: 'Steam' };
+  let asks = 0;
+  const { execute, calls } = await setup(t, { config: { approvalMode: undefined }, policy: 'never',
+    answer: async () => { asks++; return 'rejected'; },
+    hook: method => method === 'list_windows' ? [steam] : undefined });
+  canonical(await execute('launch_app', { app: steam.app }));
+  canonical(await execute('list_windows'));
+  canonical(await execute('get_window', { id: steam.id }));
+  canonical(await execute('activate_window', { window: steam }));
+  let state = canonical(await execute('get_window_state', { window: steam }));
+  state = canonical(await execute('click', { window: steam, observation_id: state.observation_id, element_index: 0, intent: '打开Steam游戏库' })).state;
+  state = canonical(await execute('type_text', { window: steam, observation_id: state.observation_id, text: 'Slay the Spire 2', intent: '填写游戏搜索词' })).state;
+  canonical(await execute('press_key', { window: steam, observation_id: state.observation_id, key: 'Return', intent: '确认库内搜索' }));
+  assert.equal(asks, 0);
+  assert.equal(calls.filter(call => call.method === 'launch_app').length, 1);
+  assert.equal(calls.some(call => Object.hasOwn(call.params, 'intent') || Object.hasOwn(call.params, 'risk')), false);
+});
+
+test('risk approval is one action at a time even for trusted applications', async t => {
+  const requests = [];
+  const { execute } = await setup(t, { config: { approvalMode: 'risk', trustedApps: [window.app] },
+    answer: async req => { requests.push(req); return 'allowed-once'; } });
+  for (const risk of ['purchase', 'delete', 'send', 'upload', 'share', 'security', 'sensitive_data']) {
+    const state = await observe(execute);
+    canonical(await execute('click', { window, observation_id: state.observation_id, element_index: 0, intent: 'perform this action', risk }));
+  }
+  assert.equal(requests.length, 7);
+  assert.equal(new Set(requests.map(req => req.callId)).size, 7);
+});
+
+test('risk mode does not trust routine metadata over a real purchase control', async t => {
+  let asks = 0;
+  const { execute, calls } = await setup(t, { config: { approvalMode: 'risk' },
+    answer: async () => { asks++; return 'rejected'; },
+    hook: (method, params) => method === 'get_window_state' ? { window: params.window, observation_id: 'buy-state',
+      accessibility: { tree: '[0] Button "购买"', focused_element: '[0] Button "购买"' }, screenshots: [] } : undefined });
+  const state = await observe(execute);
+  diagnostic(await execute('click', { window, observation_id: state.observation_id, element_index: 0, intent: '普通点击', risk: 'routine' }), 'RISK_APPROVAL_REJECTED');
+  assert.equal(asks, 1);
+  assert.equal(calls.some(call => call.method === 'click'), false);
+});
+
+test('risk mode allows routine reading without an approval service but refuses high-risk dispatch', async t => {
+  const { execute, calls } = await setup(t, { approval: false, config: { approvalMode: 'risk' } });
+  const state = await observe(execute);
+  diagnostic(await execute('click', { window, observation_id: state.observation_id, element_index: 0, intent: '确认购买' }), 'RISK_APPROVAL_UNAVAILABLE');
+  assert.equal(calls.some(call => call.method === 'click'), false);
+});
+
+test('never policy and a later allow hook cannot bypass high-risk body approval', async t => {
+  const { ctx, execute, calls } = await setup(t, { policy: 'never', config: { approvalMode: 'risk', trustedApps: [window.app] }, answer: async () => 'allowed-once' });
+  ctx.on('tools/pre-execute', async () => ({ kind: 'allow' }));
+  const state = await observe(execute);
+  diagnostic(await execute('click', { window, observation_id: state.observation_id, element_index: 0, intent: '确认购买' }), 'RISK_APPROVAL_REJECTED');
+  assert.equal(calls.some(call => call.method === 'click'), false);
+});
+
+test('risk mode retains upstream denial for otherwise routine work', async t => {
+  const { ctx, execute, calls } = await setup(t, { config: { approvalMode: 'risk' } });
+  ctx.on('tools/pre-execute', async () => ({ kind: 'deny', reason: 'Deployment restriction' }));
+  const result = await execute('launch_app', { app: 'C:\\Steam\\steam.exe' });
+  assert.equal(result.isError, true);
+  assert.equal(calls.length, 0);
+});
+
+test('cancellation during risk approval never dispatches the pending input', async t => {
+  let enter, grant;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const pending = new Promise(resolve => { grant = resolve; });
+  const { execute, calls } = await setup(t, { config: { approvalMode: 'risk' }, answer: async () => { enter(); return pending; } });
+  const state = await observe(execute);
+  const cancelled = new AbortController();
+  const operation = execute('click', { window, observation_id: state.observation_id, element_index: 0, intent: '确认购买' }, { signal: cancelled.signal });
+  await entered; cancelled.abort(); grant('allowed-once');
+  const result = await operation;
+  assert.equal(result.isError, true);
+  assert.equal(calls.some(call => call.method === 'click'), false);
 });

@@ -10,7 +10,7 @@
 
 这是使用公开 Windows API 编写的实现，不依赖 Codex 安装、`@oai/sky` 或其私有 helper。适用 Windows 10 19041+ / Windows 11；浏览器可作为普通窗口控制。Codex 的私有实现、DOM 浏览器接口和 macOS 后端不在本包内。
 
-当前源码版本 **0.1.2**，更新内容见 [CHANGELOG](CHANGELOG.md)。安装问题见 [安装指南](docs/installation.md)，游戏窗口定位见 [游戏窗口指南](docs/game-windows.md)。预构建包以 [GitHub Releases](https://github.com/Arialnya/cpuse/releases) 中实际发布的资产为准。
+当前源码版本 **0.1.3**，更新内容见 [CHANGELOG](CHANGELOG.md)。安装问题见 [安装指南](docs/installation.md)，游戏窗口定位见 [游戏窗口指南](docs/game-windows.md)。预构建包以 [GitHub Releases](https://github.com/Arialnya/cpuse/releases) 中实际发布的资产为准。
 
 ## 安装与运行
 
@@ -89,7 +89,7 @@ node scripts/download-release.mjs --version 0.1.1 --out-dir "$env:USERPROFILE\Do
     - id: cpuse
       name: dsh-plugin-cpuse
       config:
-        approvalMode: always
+        approvalMode: risk
         screenshots: true
         allowPrintWindowFallback: false
         allowClipboardPaste: false
@@ -101,9 +101,10 @@ node scripts/download-release.mjs --version 0.1.1 --out-dir "$env:USERPROFILE\Do
         windowAliases: []
 ```
 
-- `approvalMode: always`：读取某应用之前审批；每次输入、启动和切换前台再走宿主审批。`app` 则在插件生命周期内按 agent/应用记住审批。实际批准/拒绝仍由 Harness 的审批服务决定，缺少该服务时需要审批的操作不会执行。
+- `approvalMode: risk`（0.1.3 默认）：普通观察、启动 Steam 等应用、激活、导航、搜索、滚动和游戏输入不请求审批。购买/支付、删除、发送、上传、共享、权限变更、敏感信息及无法判定的操作逐次请求审批，批准不缓存。模型为每次输入提供 `intent`；插件另查当前绑定观察中的控件名称、坐标命中与部分快捷键。详情与升级配置见 [审批策略](docs/approval.md)。
+- `approvalMode: always`：保留旧的逐输入审批；`app` 则在插件生命周期内按 agent/应用记住审批。旧 profile 中显式的 `always` 不会因升级自动变成 `risk`。是否弹窗仍取决于 Harness 的 `ask/never/always` 策略；上游明确拒绝保持生效，缺少审批服务时高危操作不执行。
 - `allowedApps` / `deniedApps`：使用枚举返回的精确应用标识，忽略大小写和路径分隔符差异。空允许列表不限制普通应用。终端、锁屏和部分敏感应用为内置排除项。
-- `trustedApps`：列出的应用**完全跳过宿主审批提问**，在 `approvalMode: always`、甚至 Harness 的 `never` 审批策略下也可直接观察和输入。这是按应用显式放弃审批门槛的逃生舱：`deniedApps`、内置排除项和窗口身份校验仍然生效，但模型可以在无人确认的情况下读取该应用窗口内容并驱动其界面。只填写你需要无人值守操作的应用（例如固定的聊天工具），不要填写终端、浏览器、密码管理器或任何涉及支付、删除、上传的应用。
+- `trustedApps`：仅在旧 `always/app` 模式中免除该应用的审批；在 `risk` 模式中**不能跳过高危审批**。拒绝列表、内置排除项、窗口身份和输入暂停仍生效。通常无需为了自主启动 Steam 将它列为 trusted。
 - `screenshots: false`：供没有图像输入的模型使用 UIA 文字。没有图像能力的模型不会因为安装本插件而获得视觉理解；画布等弱 UIA 应用需要视觉模型。
 - `allowPrintWindowFallback: true`：WGC 失败时允许 PrintWindow 降级，结果明确报告实际后端与原因。某些 GPU 内容可能不完整；默认关闭。PrintWindow 失败时停止截图，不会自动激活窗口或复制可能包含其他应用内容的桌面区域。
 - `helperPath`：可信配置可指定已构建 helper 的绝对路径；模型工具不能更改它。

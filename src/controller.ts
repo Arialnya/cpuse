@@ -49,6 +49,15 @@ export class Controller {
   constructor(private readonly backend: Backend, private readonly options: ControllerOptions = {}) {
     this.ttl = options.observationTtlMs ?? 30_000;
   }
+  /** Only the current owner's fresh, identity-bound observation may inform approval. */
+  approvalObservation(args: Record<string, unknown>, owner: string): WindowState | undefined {
+    const observed = this.observation;
+    const window = args.window as WindowRef | undefined;
+    return observed && window && observed.owner === owner && observed.epoch === desktopEpoch &&
+      Date.now() - observed.createdAt <= this.ttl && observed.state.observation_id === args.observation_id &&
+      observed.state.window.id === window.id && normalize(observed.state.window.app) === normalize(window.app)
+      ? observed.state : undefined;
+  }
   private checkApp(app: string) {
     const key = normalize(app);
     if (blocked.includes(leaf(app)) || /(?:microsoft\.windowsterminal|microsoft\.sechealthui|microsoft\.lockapp)_/i.test(app) || this.options.deniedApps?.some(id => normalize(id) === key))

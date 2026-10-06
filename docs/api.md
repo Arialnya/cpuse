@@ -28,6 +28,8 @@
 
 默认观察同时取得截图和 UIA 文本。显式关闭文本会使元素索引动作不可用；`type_text` 要求确认目标内非密码文本焦点。游戏按键不要求 UIA 文本树，显式 `mode: scan-code` 按目标键盘布局发送物理扫描码。文本模式可以关闭截图，但坐标输入仍需要真实截图身份。
 
+0.1.3 的默认 `approvalMode: risk` 要求模型输入工具另带 `intent`（至多 256 字符），描述本次动作及实际影响。可选 `risk` 为 `auto/routine/purchase/delete/send/upload/share/security/sensitive_data/unknown`。高危类别强制请求一次审批；`routine` 不能覆盖真实观察中的风险提示。元数据不传给原生 helper。普通启动只需要 `app`；安装程序启动也会请求审批。详细规则与旧配置迁移见 [审批策略](approval.md)。
+
 `WindowState` 含 `window`、`observation_id`、可选 `captured_at`、`accessibility`、`screenshots` 和 `input`。`input` 报告 `injection`、helper/目标完整性、焦点来源和可用文本/按键模式。无障碍状态含索引树 `tree`、可选文档文本、焦点、选中项和选中文字。截图含 `id,width,height,originX,originY,zIndex`；原始 PNG data URL 在程序结果中可用，Harness 的模型结果改为附件图像。
 
 动作结果的 `verification` 可为 `text_changed`、`queued_unverified` 或仅 `state_refreshed`。`receipt.retry_safe` 固定为 `false`；刷新成功不证明任务成功，必须检查可见状态。显式粘贴只执行一次，不自动从 Unicode 切换；无法完整保存剪贴板时拒绝，并发修改时保留新内容。helper 被强制终止可能来不及恢复临时剪贴板，因此该功能默认禁用，由用户按需启用。
@@ -81,7 +83,7 @@ try {
 
 `createComputerUse` 的选项包括 `screenshots`、`allowPrintWindowFallback`、`allowClipboardPaste`、`windowAliases`、`allowedApps`、`deniedApps`、`observationTtlMs`、`timeoutMs` 和可信本地 `helperPath`。PrintWindow 降级默认关闭，启用后截图会标注实际后端和降级原因。应用列表使用大小写和路径分隔符规范化后的精确标识匹配，拒绝列表优先；内置排除项不能通过允许列表重新启用。
 
-`trustedApps` 只影响插件注册工具时的审批钩子：列出的应用不发起宿主审批提问，输入和观察都直接放行，即使 Harness 的审批策略为 `never`。它不改变 `allowedApps`／`deniedApps` 的执行期校验，因此被拒绝的应用无法借助它执行。按应用放弃审批意味着模型可以无人确认地读取该应用窗口内容并操作其界面，请只列出确实需要无人值守的应用。
+`trustedApps` 在旧 `always/app` 模式中免除审批，但 `risk` 模式的高危审批位于工具体内，每次独立执行，不使用应用审批缓存，也不因 trusted 或后续 pre-execute 的 allow 而跳过。它不改变应用拒绝、系统权限或窗口身份检查。受信任的本地 JavaScript facade 不经过 Harness 审批服务；这里的风险门适用于 Harness 工具及其 Code Mode SDK 调用。
 
 ## 失败与恢复
 

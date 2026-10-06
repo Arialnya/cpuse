@@ -1,4 +1,5 @@
 import { ComputerUseError, type Method, type WindowRef } from './types.js';
+import { riskCategories } from './risk.js';
 
 const fail = (message: string): never => { throw new ComputerUseError('INVALID_ARGUMENT', message); };
 export function record(value: unknown): Record<string, unknown> {
@@ -20,6 +21,9 @@ export function windowRef(value: unknown): WindowRef {
 export function validate(method: Method, value: unknown): Record<string, unknown> {
   const args = record(value);
   const output: Record<string, unknown> = {};
+  // Approval metadata is validated, but never forwarded as native input parameters.
+  if (args.intent !== undefined) string(args.intent, 'intent', 256);
+  if (args.risk !== undefined && (typeof args.risk !== 'string' || !riskCategories.includes(args.risk as typeof riskCategories[number]))) fail('Invalid risk category.');
   if (!['list_apps', 'list_windows', 'find_window', 'launch_app', 'get_window', 'capabilities'].includes(method)) output.window = windowRef(args.window);
   if (method === 'find_window') output.query = string(args.query, 'query', 256);
   if (method === 'get_window') {

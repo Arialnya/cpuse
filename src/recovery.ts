@@ -2,7 +2,8 @@ import { ComputerUseError, type Method, type WindowRef } from './types.js';
 
 const readMethods = ['find_window', 'list_windows', 'get_window_state', 'capabilities'];
 const permissionFailures = new Set(['APP_DENIED', 'SYSTEM_KEY_FORBIDDEN', 'PASSWORD_INPUT_FORBIDDEN',
-  'INPUT_BLOCKED', 'INPUT_TARGET_BLOCKED', 'INPUT_IDENTITY_UNAVAILABLE', 'DESKTOP_LOCKED', 'INPUT_PAUSED', 'CLIPBOARD_DISABLED']);
+  'INPUT_BLOCKED', 'INPUT_TARGET_BLOCKED', 'INPUT_IDENTITY_UNAVAILABLE', 'DESKTOP_LOCKED', 'INPUT_PAUSED', 'CLIPBOARD_DISABLED',
+  'RISK_APPROVAL_UNAVAILABLE', 'RISK_APPROVAL_REJECTED']);
 
 /** No executable recovery commands and no typed text or clipboard contents in diagnostics. */
 export function failureDiagnostic(error: ComputerUseError, method: Method, args: unknown) {
